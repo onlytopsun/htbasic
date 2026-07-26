@@ -1,0 +1,48 @@
+[package]
+name = "htbasic"
+version = "0.1.0"
+edition = "2021"
+description = "HTBasic / Rocky Mountain BASIC parser and interpreter"
+authors = ["HTBasic Interpreter Project"]
+license = "MIT"
+
+[dependencies]
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+image = { version = "0.25", features = ["png"] }
+rustyline = "15"
+
+[features]
+default = []
+graphics = []
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "interpreter_bench"
+harness = false
+
+[profile.release]
+opt-level = 2
+
+[lints.rust]
+# Safety / correctness — deny these
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+# Style
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Allow intentional patterns
+branches_sharing_code = "allow"
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"

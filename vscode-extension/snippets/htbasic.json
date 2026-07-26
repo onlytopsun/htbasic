@@ -1,0 +1,127 @@
+{
+    "IF THEN ELSE": {
+        "prefix": "if",
+        "body": ["IF ${1:condition} THEN", "\t${2:statements}", "ELSE", "\t${3:statements}", "END IF"],
+        "description": "IF/THEN/ELSE block"
+    },
+    "IF THEN": {
+        "prefix": "ift",
+        "body": ["IF ${1:condition} THEN ${2:statement}"],
+        "description": "Single-line IF/THEN"
+    },
+    "FOR NEXT": {
+        "prefix": "for",
+        "body": ["FOR ${1:I} = ${2:1} TO ${3:10}${4: STEP ${5:1}}", "\t${6:statements}", "NEXT ${1:I}"],
+        "description": "FOR/NEXT loop"
+    },
+    "WHILE WEND": {
+        "prefix": "while",
+        "body": ["WHILE ${1:condition}", "\t${2:statements}", "END WHILE"],
+        "description": "WHILE/END WHILE loop"
+    },
+    "LOOP END LOOP": {
+        "prefix": "loop",
+        "body": ["LOOP", "\t${1:statements}", "\tEXIT IF ${2:condition}", "END LOOP"],
+        "description": "LOOP/END LOOP with EXIT IF"
+    },
+    "REPEAT UNTIL": {
+        "prefix": "repeat",
+        "body": ["REPEAT", "\t${1:statements}", "UNTIL ${2:condition}"],
+        "description": "REPEAT/UNTIL loop"
+    },
+    "SELECT CASE": {
+        "prefix": "select",
+        "body": ["SELECT ${1:expression}", "\tCASE ${2:value}", "\t\t${3:statements}", "\tCASE ELSE", "\t\t${4:statements}", "END SELECT"],
+        "description": "SELECT/CASE/END SELECT"
+    },
+    "SUB SUBEND": {
+        "prefix": "sub",
+        "body": ["SUB ${1:Name}(${2:params})", "\t${3:statements}", "SUBEND"],
+        "description": "SUB subprogram definition"
+    },
+    "DEF FN FNEND": {
+        "prefix": "def",
+        "body": ["DEF FN${1:Name}(${2:params})", "\t${3:statements}", "\tRETURN ${4:value}", "FNEND"],
+        "description": "DEF FN function definition"
+    },
+    "CALL": {
+        "prefix": "call",
+        "body": ["CALL ${1:SubName}(${2:args})"],
+        "description": "CALL subprogram"
+    },
+    "GOTO": {
+        "prefix": "goto",
+        "body": ["GOTO ${1:Label}"],
+        "description": "GOTO label"
+    },
+    "GOSUB": {
+        "prefix": "gosub",
+        "body": ["GOSUB ${1:Label}"],
+        "description": "GOSUB subroutine"
+    },
+    "PRINT USING": {
+        "prefix": "printu",
+        "body": ["PRINT USING \"${1:###.##}\"; ${2:expr}"],
+        "description": "PRINT USING formatted output"
+    },
+    "IMAGE": {
+        "prefix": "image",
+        "body": ["IMAGE \"${1:format}\""],
+        "description": "IMAGE format definition"
+    },
+    "DIM": {
+        "prefix": "dim",
+        "body": ["DIM ${1:A}(${2:10})"],
+        "description": "DIM array declaration"
+    },
+    "COM": {
+        "prefix": "com",
+        "body": ["COM /${1:BlockName}/ ${2:REAL} ${3:Var}"],
+        "description": "COM common block"
+    },
+    "ON ERROR": {
+        "prefix": "onerr",
+        "body": ["ON ERROR GOTO ${1:Handler}"],
+        "description": "ON ERROR handler"
+    },
+    "ON KEY": {
+        "prefix": "onkey",
+        "body": ["ON KEY ${1:n} GOTO ${2:Handler}"],
+        "description": "ON KEY event handler"
+    },
+    "ASSIGN": {
+        "prefix": "assign",
+        "body": ["ASSIGN @${1:Name} TO \"${2:filename}\""],
+        "description": "ASSIGN I/O path"
+    },
+    "OUTPUT": {
+        "prefix": "output",
+        "body": ["OUTPUT @${1:Name}; ${2:data}"],
+        "description": "OUTPUT to I/O path"
+    },
+    "ENTER": {
+        "prefix": "enter",
+        "body": ["ENTER @${1:Name}; ${2:Var}"],
+        "description": "ENTER from I/O path"
+    },
+    "GRAPHICS INIT": {
+        "prefix": "ginit",
+        "body": ["GINIT", "WINDOW ${1:0}, ${2:100}, ${3:0}, ${4:100}", "MOVE ${5:10}, ${6:10}", "DRAW ${7:90}, ${8:90}", "GSTORE \"${9:output.png}\""],
+        "description": "Graphics initialization boilerplate"
+    },
+    "BEGIN END": {
+        "prefix": "begin",
+        "body": ["${1:statements}", "END"],
+        "description": "Program with END"
+    },
+    "PRINT": {
+        "prefix": "print",
+        "body": ["PRINT ${1:expression}"],
+        "description": "PRINT statement"
+    },
+    "DATA READ": {
+        "prefix": "data",
+        "body": ["DATA ${1:val1}, ${2:val2}, ${3:val3}", "READ ${4:Var1}, ${5:Var2}, ${6:Var3}"],
+        "description": "DATA and READ statements"
+    }
+}

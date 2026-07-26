@@ -1,0 +1,16 @@
+# Clippy configuration for HTBasic interpreter
+
+# Allow longer type names for AST types (e.g., SingleLineIf, SubStrAssign)
+type-complexity-threshold = 500
+
+# Allow more args for complex functions (parser, interpreter handlers)
+too-many-arguments-threshold = 12
+
+# Allow larger functions (interpreter execute_stmt, parser parse_statement)
+cognitive-complexity-threshold = 100
+
+# Allow larger structs (GraphicsState, Interpreter)
+max-struct-bools = 10
+
+# Doc comment minimum length
+doc-valid-idents = ["HTBasic", "GPIB", "RMB", "AST", "REPL", "VM", "PNG"]

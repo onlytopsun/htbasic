@@ -1,0 +1,51 @@
+{
+    "name": "htbasic",
+    "displayName": "HTBasic",
+    "description": "HTBasic / Rocky Mountain BASIC language support — syntax highlighting, snippets, and language configuration",
+    "version": "0.1.0",
+    "publisher": "htbasic-interpreter",
+    "license": "MIT",
+    "icon": "icon.png",
+    "engines": {
+        "vscode": "^1.70.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Snippets"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "htbasic",
+                "aliases": [
+                    "HTBasic",
+                    "Rocky Mountain BASIC",
+                    "htbasic"
+                ],
+                "extensions": [
+                    ".bas",
+                    ".BAS",
+                    ".htb"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "htbasic",
+                "scopeName": "source.htbasic",
+                "path": "./syntaxes/htbasic.tmLanguage.json"
+            }
+        ],
+        "snippets": [
+            {
+                "language": "htbasic",
+                "path": "./snippets/htbasic.json"
+            }
+        ]
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/htbasic-interpreter/htbasic"
+    }
+}

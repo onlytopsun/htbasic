@@ -1,0 +1,114 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "HTBasic",
+    "scopeName": "source.htbasic",
+    "patterns": [
+        {
+            "comment": "Line comment (!)",
+            "name": "comment.line.bang.htbasic",
+            "match": "!.*$"
+        },
+        {
+            "comment": "REM comment",
+            "name": "comment.line.rem.htbasic",
+            "match": "(?i)^\\s*REM\\b.*$"
+        },
+        {
+            "comment": "String literal (double-quoted)",
+            "name": "string.quoted.double.htbasic",
+            "begin": "\"",
+            "end": "\"",
+            "patterns": [
+                {
+                    "name": "constant.character.escape.htbasic",
+                    "match": "\"\""
+                }
+            ]
+        },
+        {
+            "comment": "Hex literal &H...",
+            "name": "constant.numeric.hex.htbasic",
+            "match": "(?i)&H[0-9A-F]+"
+        },
+        {
+            "comment": "Octal literal &O...",
+            "name": "constant.numeric.octal.htbasic",
+            "match": "(?i)&O[0-7]+"
+        },
+        {
+            "comment": "Numeric literal (float or integer)",
+            "name": "constant.numeric.htbasic",
+            "match": "\\b\\d+(\\.\\d+)?([Ee][+-]?\\d+)?[%#]?\\b"
+        },
+        {
+            "comment": "I/O path reference (@name)",
+            "name": "variable.other.io.htbasic",
+            "match": "@[A-Za-z_]\\w*"
+        },
+        {
+            "comment": "Label definition (identifier followed by colon at line start)",
+            "name": "entity.name.label.htbasic",
+            "match": "^\\s*([A-Za-z_]\\w*):"
+        },
+        {
+            "comment": "Line number at start of line",
+            "name": "constant.numeric.linenumber.htbasic",
+            "match": "^\\s*\\d+(?=\\s)"
+        },
+        {
+            "comment": "String variable (ends with $)",
+            "name": "variable.other.string.htbasic",
+            "match": "\\b[A-Za-z_]\\w*\\$"
+        },
+        {
+            "comment": "Built-in functions",
+            "name": "support.function.builtin.htbasic",
+            "match": "(?i)\\b(ABS|SQR|EXP|LOG|LOG10|SIN|COS|TAN|ASIN|ACOS|ATN|SINH|COSH|TANH|INT|FRACT|CEIL|FLOOR|ROUND|TRUNCATE|SGN|MAX|MIN|RND|PI|DEG|RAD|LEN|UPC\\$|LWC\\$|TRIM\\$|LTRIM\\$|RTRIM\\$|REV\\$|RPT\\$|CHR\\$|STR\\$|VAL|VAL\\$|NUM|POS|INSTR|MAXLEN|SPACE\\$|STRING\\$|LCASE\\$|UCASE\\$|DATE\\$|TIME\\$|TIMEDATE|SYSTEM\\$|ENVIRON\\$|COMMAND\\$|ERRN|ERRL|ERRM\\$|BIT|BINAND|BINOR|BINXOR|BINNOT|SHL|SHR|RANDOMIZE|CMPLX|DET|DOT|RANK|SUM|BASE|UBOUND|LBOUND|SIZE)\\b"
+        },
+        {
+            "comment": "Keywords — declarations",
+            "name": "keyword.declaration.htbasic",
+            "match": "(?i)\\b(DIM|COM|REAL|INTEGER|SHORT|LONG|COMPLEX|ALLOCATE|DEALLOCATE|REDIM|STATIC|OPTION BASE)\\b"
+        },
+        {
+            "comment": "Keywords — subprograms / functions",
+            "name": "keyword.subprogram.htbasic",
+            "match": "(?i)\\b(SUB|SUBEND|DEF FN|FNEND|CALL|SUBEXIT|RETURN|LOADSUB|DELSUB)\\b"
+        },
+        {
+            "comment": "Keywords — control flow",
+            "name": "keyword.control.htbasic",
+            "match": "(?i)\\b(IF|THEN|ELSE|END IF|FOR|TO|STEP|NEXT|WHILE|END WHILE|LOOP|END LOOP|EXIT IF|REPEAT|UNTIL|SELECT|CASE|CASE ELSE|END SELECT|GOTO|GOSUB|ON|ON ERROR|STOP|END|PAUSE)\\b"
+        },
+        {
+            "comment": "Keywords — I/O",
+            "name": "keyword.io.htbasic",
+            "match": "(?i)\\b(PRINT|PRINT USING|IMAGE|INPUT|LINPUT|ASSIGN|OUTPUT|ENTER|READ|DATA|RESTORE|DISP|BEEP|CREATE|PURGE|CAT|CHAIN|MASS STORAGE IS)\\b"
+        },
+        {
+            "comment": "Keywords — matrix",
+            "name": "keyword.matrix.htbasic",
+            "match": "(?i)\\b(MAT|INV|TRN|IDN|ZER|CON|RSUM|CSUM)\\b"
+        },
+        {
+            "comment": "Keywords — other",
+            "name": "keyword.other.htbasic",
+            "match": "(?i)\\b(LET|RANDOMIZE|WAIT|CONFIGURE|CHANGE|ENABLE|DISABLE|OFF|ON KEY|ON CYCLE|ON KBD|ON KNOB|ON END|ON HALT|ON TIMEOUT|ON SIGNAL|RESET|ABORT|TRANSFER|STATUS|CONTROL|CLEAR|TRIGGER|REN|XREF|PROG|BLOAD|BSTORE|DUMP|LOAD|SAVE|GET|MERGE|SCRATCH)\\b"
+        },
+        {
+            "comment": "Graphics keywords",
+            "name": "keyword.graphics.htbasic",
+            "match": "(?i)\\b(GINIT|GCLEAR|PLOTTER IS|MOVE|DRAW|IMOVE|IDRAW|PLOT|PEN|LABEL|CSIZE|LDIR|LORG|GFONT|AXES|GRID|FRAME|CLIP|WINDOW|VIEWPORT|RECTANGLE|POLYGON|POLYLINE|GLOAD|GSTORE|PENUP|COLOR|LINE TYPE|AREA|INTENSITY|SET PEN|SEPARATE ALPHA|MERGE ALPHA|DUMP GRAPHICS|DIGITIZE|READ LOCATOR|GRAPHICS INPUT)\\b"
+        },
+        {
+            "comment": "Logical operators",
+            "name": "keyword.operator.logical.htbasic",
+            "match": "(?i)\\b(AND|OR|NOT|EXOR|MOD|MODULO|DIV)\\b"
+        },
+        {
+            "comment": "Operators",
+            "name": "keyword.operator.htbasic",
+            "match": "[+\\-*/^&=<>]|\\b(<>|<=|>=)\\b|&"
+        }
+    ]
+}
