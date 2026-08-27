@@ -525,6 +525,7 @@ impl Compiler {
             Stmt::Linput(_, _, _) => {},    // Stub
             Stmt::Image(_, _) => {},        // Stub
             Stmt::Configure(_, _, _) => {}, // Stub
+            Stmt::Output(_, _, _) => {},    // Stub
             Stmt::Disp(_, _) => {},         // Stub
 
             // String ops
@@ -580,6 +581,10 @@ impl Compiler {
                     let ni = self.name_idx(name);
                     self.emit(OpCode::Load(ni));
                 }
+            },
+            Expr::WholeArray(name, _) => {
+                let ni = self.name_idx(name);
+                self.emit(OpCode::Load(ni));
             },
             Expr::ArrayRef(name, indices, _) => {
                 for idx in indices {
@@ -736,7 +741,9 @@ impl VM {
 
     pub fn run(&mut self) -> Result<Vec<String>> {
         loop {
-            if self.ip >= self.chunk.code.len() { break; }
+            if self.ip >= self.chunk.code.len() {
+                break;
+            }
             let op = self.chunk.code[self.ip];
             self.ip += 1;
             self.execute(op)?;

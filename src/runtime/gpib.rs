@@ -4,7 +4,6 @@
 /// and device-specific SCPI commands.
 ///
 /// GPIB address convention (HP style): 7xx = interface 7, address xx (0-30).
-
 use std::collections::{HashMap, VecDeque};
 
 // ===================== SCPI Error Queue =====================
@@ -124,43 +123,43 @@ pub trait Instrument: Send {
             "*STB?" => {
                 let stb = self.status_byte();
                 Some(stb.to_string())
-            }
+            },
             "*ESR?" => {
                 let esr = self.status_system().esr;
                 self.status_system().esr = 0; // ESR clears on read
                 Some(esr.to_string())
-            }
+            },
             "*ESE?" => Some(self.status_system().ese.to_string()),
             "*ESE" => {
                 // *ESE <value> should be handled by command(), this is query only
                 Some(self.status_system().ese.to_string())
-            }
+            },
             "*SRE?" => Some(self.status_system().sre.to_string()),
             "*CLS" => {
                 self.status_system().clear();
                 self.error_queue().push(0, "No error");
                 None
-            }
+            },
             "*RST" => {
                 self.status_system().clear();
                 self.error_queue().push(0, "No error");
                 None
-            }
+            },
             "*OPC" => {
                 self.status_system().opc = true;
                 self.status_system().set_esr(0);
                 None
-            }
+            },
             "*OPC?" => {
                 self.status_system().opc = true;
                 self.status_system().set_esr(0);
                 Some("1".to_string())
-            }
+            },
             "*WAI" => None, // No-op in simulation
             "SYST:ERR?" | "SYSTEM:ERROR?" => {
                 let err = self.error_queue().pop();
                 Some(format!("{},\"{}\"", err.code, err.message))
-            }
+            },
             _ => None,
         }
     }
@@ -212,7 +211,7 @@ impl Dmm {
     pub fn new() -> Self {
         Self {
             function: DmmFunction::DcVoltage,
-            range: 10.0, // 10V range
+            range: 10.0,          // 10V range
             resolution: 0.000001, // 6.5 digits
             nplc: 10.0,
             auto_zero: true,
@@ -233,10 +232,16 @@ impl Dmm {
             DmmFunction::AcCurrent => (self.counter as f64 * 0.3).sin().abs() * 0.01,
             DmmFunction::Resistance2W | DmmFunction::Resistance4W => {
                 1000.0 + ((self.counter % 20) as f64) * 47.0
-            }
+            },
             DmmFunction::Frequency => 1000.0 + ((self.counter % 5) as f64) * 0.1,
             DmmFunction::Period => 1.0 / (1000.0 + self.counter as f64 * 0.01),
-            DmmFunction::Continuity => if self.counter % 3 == 0 { 0.1 } else { 1e9 },
+            DmmFunction::Continuity => {
+                if self.counter % 3 == 0 {
+                    0.1
+                } else {
+                    1e9
+                }
+            },
             DmmFunction::Diode => 0.6 + ((self.counter % 10) as f64) * 0.01,
         };
         // Add noise (10 ppm of range + 1 ppm of reading)
@@ -265,42 +270,76 @@ impl Instrument for Dmm {
             return;
         }
         if upper.starts_with("CONF:") || upper.starts_with("CONFIGURE:") {
-            if upper.contains("VOLT:DC") { self.function = DmmFunction::DcVoltage; }
-            else if upper.contains("VOLT:AC") { self.function = DmmFunction::AcVoltage; }
-            else if upper.contains("CURR:DC") { self.function = DmmFunction::DcCurrent; }
-            else if upper.contains("CURR:AC") { self.function = DmmFunction::AcCurrent; }
-            else if upper.contains("RES") { self.function = DmmFunction::Resistance2W; }
-            else if upper.contains("FRES") { self.function = DmmFunction::Resistance4W; }
-            else if upper.contains("FREQ") { self.function = DmmFunction::Frequency; }
-            else if upper.contains("PER") { self.function = DmmFunction::Period; }
-            else if upper.contains("CONT") { self.function = DmmFunction::Continuity; }
-            else if upper.contains("DIOD") { self.function = DmmFunction::Diode; }
+            if upper.contains("VOLT:DC") {
+                self.function = DmmFunction::DcVoltage;
+            } else if upper.contains("VOLT:AC") {
+                self.function = DmmFunction::AcVoltage;
+            } else if upper.contains("CURR:DC") {
+                self.function = DmmFunction::DcCurrent;
+            } else if upper.contains("CURR:AC") {
+                self.function = DmmFunction::AcCurrent;
+            } else if upper.contains("RES") {
+                self.function = DmmFunction::Resistance2W;
+            } else if upper.contains("FRES") {
+                self.function = DmmFunction::Resistance4W;
+            } else if upper.contains("FREQ") {
+                self.function = DmmFunction::Frequency;
+            } else if upper.contains("PER") {
+                self.function = DmmFunction::Period;
+            } else if upper.contains("CONT") {
+                self.function = DmmFunction::Continuity;
+            } else if upper.contains("DIOD") {
+                self.function = DmmFunction::Diode;
+            }
             return;
         }
         if upper.starts_with("SENS:") || upper.starts_with("SENSE:") || upper.starts_with("MEAS:") {
-            if upper.contains("VOLT:DC") { self.function = DmmFunction::DcVoltage; }
-            else if upper.contains("VOLT:AC") { self.function = DmmFunction::AcVoltage; }
-            else if upper.contains("CURR:DC") { self.function = DmmFunction::DcCurrent; }
-            else if upper.contains("CURR:AC") { self.function = DmmFunction::AcCurrent; }
-            else if upper.contains("RES") { self.function = DmmFunction::Resistance2W; }
-            else if upper.contains("FRES") { self.function = DmmFunction::Resistance4W; }
-            else if upper.contains("FREQ") { self.function = DmmFunction::Frequency; }
+            if upper.contains("VOLT:DC") {
+                self.function = DmmFunction::DcVoltage;
+            } else if upper.contains("VOLT:AC") {
+                self.function = DmmFunction::AcVoltage;
+            } else if upper.contains("CURR:DC") {
+                self.function = DmmFunction::DcCurrent;
+            } else if upper.contains("CURR:AC") {
+                self.function = DmmFunction::AcCurrent;
+            } else if upper.contains("RES") {
+                self.function = DmmFunction::Resistance2W;
+            } else if upper.contains("FRES") {
+                self.function = DmmFunction::Resistance4W;
+            } else if upper.contains("FREQ") {
+                self.function = DmmFunction::Frequency;
+            }
             // If it's a query (ends with ?), handle in query()
             return;
         }
         // Range and resolution
         if upper.starts_with("RANGE ") || upper.starts_with("SENS:VOLT:DC:RANG ") {
-            if let Ok(r) = upper.split_whitespace().last().unwrap_or("10").parse::<f64>() {
+            if let Ok(r) = upper
+                .split_whitespace()
+                .last()
+                .unwrap_or("10")
+                .parse::<f64>()
+            {
                 self.range = r;
             }
         }
         if upper.starts_with("RES ") || upper.starts_with("SENS:VOLT:DC:RES ") {
-            if let Ok(r) = upper.split_whitespace().last().unwrap_or("0.000001").parse::<f64>() {
+            if let Ok(r) = upper
+                .split_whitespace()
+                .last()
+                .unwrap_or("0.000001")
+                .parse::<f64>()
+            {
                 self.resolution = r;
             }
         }
         if upper.starts_with("NPLC ") || upper.starts_with("SENS:VOLT:DC:NPLC ") {
-            if let Ok(n) = upper.split_whitespace().last().unwrap_or("10").parse::<f64>() {
+            if let Ok(n) = upper
+                .split_whitespace()
+                .last()
+                .unwrap_or("10")
+                .parse::<f64>()
+            {
                 self.nplc = n;
             }
         }
@@ -339,17 +378,29 @@ impl Instrument for Dmm {
             return format!("{} {:.3},{}", func, self.range, self.resolution);
         }
         // Measurement queries
-        if upper == "READ?" || upper.ends_with(":DC?") || upper.ends_with(":AC?")
-            || upper.ends_with("RES?") || upper.ends_with(":FREQ?") || upper.ends_with(":PER?")
-            || upper.starts_with("MEAS:") || upper == "INIT" || upper == "INIT;*WAI;FETCH?"
+        if upper == "READ?"
+            || upper.ends_with(":DC?")
+            || upper.ends_with(":AC?")
+            || upper.ends_with("RES?")
+            || upper.ends_with(":FREQ?")
+            || upper.ends_with(":PER?")
+            || upper.starts_with("MEAS:")
+            || upper == "INIT"
+            || upper == "INIT;*WAI;FETCH?"
         {
             let reading = self.take_reading();
             return format!("{:.9}", reading);
         }
         // Configuration queries
-        if upper == "RANGE?" { return format!("{:.3}", self.range); }
-        if upper == "RES?" { return format!("{:.9}", self.resolution); }
-        if upper == "NPLC?" { return format!("{:.1}", self.nplc); }
+        if upper == "RANGE?" {
+            return format!("{:.3}", self.range);
+        }
+        if upper == "RES?" {
+            return format!("{:.9}", self.resolution);
+        }
+        if upper == "NPLC?" {
+            return format!("{:.1}", self.nplc);
+        }
         // Default — treat as measurement
         if upper.ends_with('?') {
             return format!("{:.9}", self.take_reading());
@@ -357,10 +408,18 @@ impl Instrument for Dmm {
         String::new()
     }
 
-    fn status_byte(&self) -> u8 { self.status.stb }
-    fn set_status_byte(&mut self, byte: u8) { self.status.stb = byte; }
-    fn error_queue(&mut self) -> &mut ErrorQueue { &mut self.error_queue }
-    fn status_system(&mut self) -> &mut StatusSystem { &mut self.status }
+    fn status_byte(&self) -> u8 {
+        self.status.stb
+    }
+    fn set_status_byte(&mut self, byte: u8) {
+        self.status.stb = byte;
+    }
+    fn error_queue(&mut self) -> &mut ErrorQueue {
+        &mut self.error_queue
+    }
+    fn status_system(&mut self) -> &mut StatusSystem {
+        &mut self.status
+    }
 }
 
 // ===================== Function Generator (HP 33120A) =====================
@@ -397,25 +456,39 @@ impl Instrument for FuncGen {
     fn command(&mut self, cmd: &str) {
         let upper = cmd.trim().to_uppercase();
         if upper.starts_with("*ESE ") {
-            if let Ok(v) = upper[5..].trim().parse::<u8>() { self.status.ese = v; }
+            if let Ok(v) = upper[5..].trim().parse::<u8>() {
+                self.status.ese = v;
+            }
             return;
         }
         if upper.starts_with("*SRE ") {
-            if let Ok(v) = upper[5..].trim().parse::<u8>() { self.status.sre = v; }
+            if let Ok(v) = upper[5..].trim().parse::<u8>() {
+                self.status.sre = v;
+            }
             return;
         }
         if upper.starts_with("FREQ ") {
             if let Ok(f) = upper[5..].trim().parse::<f64>() {
-                if f > 0.0 { self.frequency = f; }
-                else { self.error_queue.push(-222, "Frequency must be positive"); }
+                if f > 0.0 {
+                    self.frequency = f;
+                } else {
+                    self.error_queue.push(-222, "Frequency must be positive");
+                }
             }
         } else if upper.starts_with("VOLT ") {
-            if let Ok(v) = upper[5..].trim().parse::<f64>() { self.amplitude = v; }
+            if let Ok(v) = upper[5..].trim().parse::<f64>() {
+                self.amplitude = v;
+            }
         } else if upper.starts_with("VOLT:OFFS ") {
-            if let Ok(o) = upper[10..].trim().parse::<f64>() { self.offset = o; }
+            if let Ok(o) = upper[10..].trim().parse::<f64>() {
+                self.offset = o;
+            }
         } else if upper.starts_with("FUNC ") || upper.starts_with("WAVE ") {
             let wf = upper[5..].trim().to_uppercase();
-            if matches!(wf.as_str(), "SIN" | "SQU" | "TRI" | "RAMP" | "NOIS" | "DC" | "USER") {
+            if matches!(
+                wf.as_str(),
+                "SIN" | "SQU" | "TRI" | "RAMP" | "NOIS" | "DC" | "USER"
+            ) {
                 self.waveform = wf;
             } else {
                 self.error_queue.push(-224, "Illegal waveform parameter");
@@ -425,7 +498,9 @@ impl Instrument for FuncGen {
         } else if upper == "OUTP OFF" || upper == "OUTPUT OFF" || upper == "OUTP 0" {
             self.output_enabled = false;
         } else if upper.starts_with("BURS:NCYC ") {
-            if let Ok(n) = upper[10..].trim().parse::<u32>() { self.burst_count = n; }
+            if let Ok(n) = upper[10..].trim().parse::<u32>() {
+                self.burst_count = n;
+            }
         } else if upper == "BURS ON" || upper == "BURST ON" {
             self.burst_enabled = true;
         } else if upper == "BURS OFF" || upper == "BURST OFF" {
@@ -435,8 +510,12 @@ impl Instrument for FuncGen {
 
     fn query(&mut self, cmd: &str) -> String {
         let upper = cmd.trim().to_uppercase();
-        if let Some(resp) = self.handle_common(cmd) { return resp; }
-        if let Some(resp) = self.handle_status(cmd) { return resp; }
+        if let Some(resp) = self.handle_common(cmd) {
+            return resp;
+        }
+        if let Some(resp) = self.handle_status(cmd) {
+            return resp;
+        }
         match upper.as_str() {
             "FREQ?" => format!("{:.9}", self.frequency),
             "VOLT?" | "AMPL?" => format!("{:.6}", self.amplitude),
@@ -449,10 +528,18 @@ impl Instrument for FuncGen {
         }
     }
 
-    fn status_byte(&self) -> u8 { self.status.stb }
-    fn set_status_byte(&mut self, byte: u8) { self.status.stb = byte; }
-    fn error_queue(&mut self) -> &mut ErrorQueue { &mut self.error_queue }
-    fn status_system(&mut self) -> &mut StatusSystem { &mut self.status }
+    fn status_byte(&self) -> u8 {
+        self.status.stb
+    }
+    fn set_status_byte(&mut self, byte: u8) {
+        self.status.stb = byte;
+    }
+    fn error_queue(&mut self) -> &mut ErrorQueue {
+        &mut self.error_queue
+    }
+    fn status_system(&mut self) -> &mut StatusSystem {
+        &mut self.status
+    }
 }
 
 // ===================== Oscilloscope (HP 54600A) =====================
@@ -489,19 +576,42 @@ impl Instrument for Scope {
     fn command(&mut self, cmd: &str) {
         let upper = cmd.trim().to_uppercase();
         if upper.starts_with("*ESE ") {
-            if let Ok(v) = upper[5..].trim().parse::<u8>() { self.status.ese = v; }
+            if let Ok(v) = upper[5..].trim().parse::<u8>() {
+                self.status.ese = v;
+            }
             return;
         }
-        if upper.starts_with("TIM ") || upper.starts_with("TIMEBASE ") || upper.starts_with("TIM:SCAL ") {
-            if let Ok(t) = upper.split_whitespace().last().unwrap_or("0.001").parse::<f64>() {
+        if upper.starts_with("TIM ")
+            || upper.starts_with("TIMEBASE ")
+            || upper.starts_with("TIM:SCAL ")
+        {
+            if let Ok(t) = upper
+                .split_whitespace()
+                .last()
+                .unwrap_or("0.001")
+                .parse::<f64>()
+            {
                 self.timebase = t;
             }
-        } else if upper.starts_with("CHAN1:SCAL ") || upper.starts_with("CH1:SCAL ") || upper.starts_with("VOLT ") {
-            if let Ok(v) = upper.split_whitespace().last().unwrap_or("1.0").parse::<f64>() {
+        } else if upper.starts_with("CHAN1:SCAL ")
+            || upper.starts_with("CH1:SCAL ")
+            || upper.starts_with("VOLT ")
+        {
+            if let Ok(v) = upper
+                .split_whitespace()
+                .last()
+                .unwrap_or("1.0")
+                .parse::<f64>()
+            {
                 self.volts_per_div = v;
             }
         } else if upper.starts_with("TRIG:LEV ") || upper.starts_with("TRIGGER:LEVEL ") {
-            if let Ok(l) = upper.split_whitespace().last().unwrap_or("0.0").parse::<f64>() {
+            if let Ok(l) = upper
+                .split_whitespace()
+                .last()
+                .unwrap_or("0.0")
+                .parse::<f64>()
+            {
                 self.trigger_level = l;
             }
         } else if upper.starts_with("TRIG:SOUR ") {
@@ -515,8 +625,12 @@ impl Instrument for Scope {
 
     fn query(&mut self, cmd: &str) -> String {
         let upper = cmd.trim().to_uppercase();
-        if let Some(resp) = self.handle_common(cmd) { return resp; }
-        if let Some(resp) = self.handle_status(cmd) { return resp; }
+        if let Some(resp) = self.handle_common(cmd) {
+            return resp;
+        }
+        if let Some(resp) = self.handle_status(cmd) {
+            return resp;
+        }
         self.counter += 1;
         match upper.as_str() {
             "TIM?" | "TIM:SCAL?" | "TIMEBASE?" => format!("{:.9}", self.timebase),
@@ -528,19 +642,27 @@ impl Instrument for Scope {
             "WAV:DATA?" => {
                 let val = (self.counter as f64 * 0.1).sin() * self.volts_per_div;
                 format!("{:.9}", val)
-            }
+            },
             "CHAN1:DATA?" => {
                 let val = (self.counter as f64 * 0.2).cos() * self.volts_per_div;
                 format!("{:.9}", val)
-            }
+            },
             _ => String::new(),
         }
     }
 
-    fn status_byte(&self) -> u8 { self.status.stb }
-    fn set_status_byte(&mut self, byte: u8) { self.status.stb = byte; }
-    fn error_queue(&mut self) -> &mut ErrorQueue { &mut self.error_queue }
-    fn status_system(&mut self) -> &mut StatusSystem { &mut self.status }
+    fn status_byte(&self) -> u8 {
+        self.status.stb
+    }
+    fn set_status_byte(&mut self, byte: u8) {
+        self.status.stb = byte;
+    }
+    fn error_queue(&mut self) -> &mut ErrorQueue {
+        &mut self.error_queue
+    }
+    fn status_system(&mut self) -> &mut StatusSystem {
+        &mut self.status
+    }
 }
 
 // ===================== GPIB Bus =====================
@@ -551,7 +673,9 @@ pub struct GpibBus {
 
 impl GpibBus {
     pub fn new() -> Self {
-        let mut bus = Self { devices: HashMap::new() };
+        let mut bus = Self {
+            devices: HashMap::new(),
+        };
         // Pre-register default instruments
         bus.add_device(22, Box::new(Dmm::new()));
         bus.add_device(10, Box::new(FuncGen::new()));
@@ -563,7 +687,9 @@ impl GpibBus {
         self.devices.insert(address, device);
     }
 
-    pub fn has_device(&self, address: u8) -> bool { self.devices.contains_key(&address) }
+    pub fn has_device(&self, address: u8) -> bool {
+        self.devices.contains_key(&address)
+    }
 
     pub fn output(&mut self, address: u8, data: &str) -> String {
         if let Some(dev) = self.devices.get_mut(&address) {
@@ -602,12 +728,17 @@ impl GpibBus {
     }
 
     pub fn list_devices(&self) -> Vec<(u8, String)> {
-        self.devices.iter().map(|(&a, _)| (a, format!("Device at {}", a))).collect()
+        self.devices
+            .iter()
+            .map(|(&a, _)| (a, format!("Device at {}", a)))
+            .collect()
     }
 }
 
 impl Default for GpibBus {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn parse_gpib_address(addr_str: &str) -> Option<u8> {

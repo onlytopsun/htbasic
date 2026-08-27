@@ -308,13 +308,21 @@ impl Lexer {
 
             // Comment: ! (rest of line is comment)
             if ch == '!' {
-                // HTBasic supports inline ! comments
-                // Record the comment token and skip rest of line
-                tokens.push(Token::new(
-                    TokenKind::Bang,
-                    byte_pos,
-                    base_offset + text.len(),
-                ));
+                // HTBasic supports inline ! comments. A `!` at the start
+                // of the line (possibly after a leading line number) is a
+                // statement-level comment; anywhere else it just ends the
+                // line silently so inline trailing comments don't break
+                // the parser.
+                let starts_line = tokens.is_empty()
+                    || (tokens.len() == 1
+                        && matches!(tokens[0].kind, TokenKind::IntegerLiteral(_)));
+                if starts_line {
+                    tokens.push(Token::new(
+                        TokenKind::Bang,
+                        byte_pos,
+                        base_offset + text.len(),
+                    ));
+                }
                 tokens.push(Token::new(
                     TokenKind::Newline,
                     base_offset + text.len(),
@@ -535,7 +543,21 @@ impl Lexer {
                 }
 
                 // Single-word keyword or identifier
-                if let Some(kw) = keywords::match_keyword(&word) {
+                let mut kw = keywords::match_keyword(&word);
+                if kw == Some(TokenKind::Loop_) {
+                    // `Loop` is a common variable name in HTBasic programs
+                    // (e.g. `FOR Loop=1 TO 30`). It is a statement keyword
+                    // only at statement start or after END (`END LOOP`);
+                    // elsewhere treat it as an identifier.
+                    let prev_is_start = matches!(
+                        tokens.last().map(|t| &t.kind),
+                        None | Some(TokenKind::Newline) | Some(TokenKind::Colon) | Some(TokenKind::End)
+                    );
+                    if !prev_is_start {
+                        kw = None;
+                    }
+                }
+                if let Some(kw) = kw {
                     tokens.push(Token::new(kw, start, word_end));
                 } else if word.ends_with('$') {
                     tokens.push(Token::new(

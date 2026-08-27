@@ -125,6 +125,8 @@ pub struct Interpreter {
     option_base: usize,
     /// File I/O registry.
     io: IoRegistry,
+    /// Pending OUTPUT text per path (trailing `;`/`,` keeps the line open).
+    io_pending: HashMap<String, String>,
     /// Error handler label (ON ERROR GOTO label).
     error_handler: Option<String>,
     /// Event handlers: event_name → (label, priority, response_type)
@@ -143,6 +145,16 @@ pub struct Interpreter {
     gpib: GpibBus,
     /// Map from path name → GPIB address (populated by ASSIGN).
     gpib_paths: HashMap<String, u8>,
+    /// DEF FN return capture: None = not executing a FN body;
+    /// Some(Armed) = inside FN body, no RETURN yet; Some(Fired(v)) = RETURN ran.
+    fn_return: Option<FnReturn>,
+}
+
+/// Return state while executing a DEF FN body.
+#[derive(Clone)]
+enum FnReturn {
+    Armed,
+    Fired(Option<Value>),
 }
 
 impl Interpreter {
@@ -170,6 +182,7 @@ impl Interpreter {
             output: Vec::new(),
             option_base: 0,
             io: IoRegistry::new(),
+            io_pending: HashMap::new(),
             error_handler: None,
             event_handlers: HashMap::new(),
             events_enabled: true,
@@ -179,6 +192,7 @@ impl Interpreter {
             graphics: GraphicsState::new(),
             gpib: GpibBus::new(),
             gpib_paths: HashMap::new(),
+            fn_return: None,
         };
 
         interp.compile(program);
@@ -268,7 +282,24 @@ impl Interpreter {
 
             match instr {
                 Instr::Stmt(stmt) => {
-                    self.execute_stmt(&stmt)?;
+                    if let Err(e) = self.execute_stmt(&stmt) {
+                        // Arithmetic and subscript errors raise directly
+                        // rather than through runtime_error; route them
+                        // through the ON ERROR handler when one is set.
+                        let code = match &e {
+                            HtBasicError::DivisionByZero { .. } => Some(26),
+                            HtBasicError::SubscriptError { .. } => Some(61),
+                            HtBasicError::TypeError { .. } => Some(70),
+                            HtBasicError::UndefinedVariable { .. } => Some(71),
+                            _ => None,
+                        };
+                        if let Some(c) = code {
+                            if self.runtime_error(c, &e.to_string()).is_ok() {
+                                continue; // jumped to the ON ERROR handler
+                            }
+                        }
+                        return Err(e);
+                    }
                     self.pc += 1;
                 },
                 Instr::Jump(target) => {
@@ -304,7 +335,77 @@ impl Interpreter {
             }
         }
 
+        self.flush_io_pending();
+
         Ok(std::mem::take(&mut self.output))
+    }
+
+    /// Render OUTPUT print items into one line. Numbers get HP-style
+    /// sign spacing (a leading space), matching `OUTPUT @Out; A(1,1);`
+    /// output in the TransEra examples (e.g. Prtmat's `[ 1 2 3 ]`).
+    fn render_output_items(&mut self, items: &[PrintItem]) -> Result<String> {
+        let mut line = String::new();
+        for item in items {
+            match item {
+                PrintItem::Expr(expr) => {
+                    let val = self.eval_expr(expr)?;
+                    if matches!(&val, Value::Real(_) | Value::Integer(_)) {
+                        line.push(' ');
+                    }
+                    line.push_str(&val.to_display_string());
+                },
+                PrintItem::Semicolon => {},
+                PrintItem::Comma => {
+                    // Tab to next zone (every 16 columns)
+                    while line.len() % 16 != 0 {
+                        line.push(' ');
+                    }
+                },
+                PrintItem::Tab(expr) => {
+                    let col = self.eval_expr(expr)?.as_integer().max(1) as usize;
+                    while line.len() < col {
+                        line.push(' ');
+                    }
+                },
+                PrintItem::Using(format, exprs) => {
+                    let fmt_str = self.eval_expr(format)?.as_string();
+                    for e in exprs {
+                        let val = self.eval_expr(e)?;
+                        line.push_str(&self.format_using(&fmt_str, &val));
+                    }
+                },
+            }
+        }
+        Ok(line)
+    }
+
+    /// Write one complete OUTPUT line to its destination. CRT-assigned
+    /// paths (and the built-in CRT device) go to the program output.
+    fn write_output_line(&mut self, path: &str, text: &str) {
+        if self.io.is_crt(path) || path.eq_ignore_ascii_case("CRT") {
+            self.output.push(text.to_string());
+            return;
+        }
+        if let Some(gpib_addr) = self.resolve_gpib(path) {
+            let response = self.gpib.output(gpib_addr, text);
+            if !response.is_empty() {
+                self.scope
+                    .set(&format!("__gpib_resp_{}", path), Value::string(&response));
+            }
+            return;
+        }
+        if let Err(e) = self.io.output(path, text) {
+            let _ = self.runtime_error(710, &format!("OUTPUT: {}", e));
+        }
+    }
+
+    /// Flush OUTPUT lines still pending at program end (trailing `;`/`,`
+    /// suppresses the terminator, so text can outlive its statement).
+    fn flush_io_pending(&mut self) {
+        let pending = std::mem::take(&mut self.io_pending);
+        for (path, text) in pending {
+            self.write_output_line(&path, &text);
+        }
     }
 
     // ===================== Statement Execution =====================
@@ -418,6 +519,24 @@ impl Interpreter {
                     line.push_str(&formatted);
                 }
                 self.output.push(line);
+            },
+
+            Stmt::Output(path, items, _span) => {
+                // OUTPUT @path; items — a trailing `;`/`,` keeps the line
+                // open (HTBasic suppresses the terminator), so text
+                // accumulates per path until an OUTPUT ends without one.
+                let line = self.render_output_items(items)?;
+                let open = matches!(
+                    items.last(),
+                    Some(PrintItem::Semicolon) | Some(PrintItem::Comma)
+                );
+                let entry = self.io_pending.entry(path.clone()).or_default();
+                entry.push_str(&line);
+                if !open {
+                    if let Some(text) = self.io_pending.remove(path) {
+                        self.write_output_line(path, &text);
+                    }
+                }
             },
 
             Stmt::If(if_block, _span) => {
@@ -556,7 +675,12 @@ impl Interpreter {
                     None
                 };
 
-                if let Some(mut frame) = self.call_stack.pop() {
+                if let Some(fr) = self.fn_return.as_mut() {
+                    // RETURN nested inside a DEF FN body (e.g. in a single-line
+                    // IF): capture it for execute_fn instead of popping the
+                    // GOSUB call stack.
+                    *fr = FnReturn::Fired(ret_val);
+                } else if let Some(mut frame) = self.call_stack.pop() {
                     if let Some(val) = ret_val {
                         self.scope.set("__return__", val.clone());
                         frame.local_scope.set("__return__", val);
@@ -633,6 +757,23 @@ impl Interpreter {
 
             Stmt::Read(vars, _span) => {
                 for var in vars {
+                    // Whole-array target (`READ Matrix(*)`): fill the
+                    // array in row-major order from DATA.
+                    if let Some(Value::Array(arr)) = self.scope.get(var) {
+                        let mut filled = arr.clone();
+                        for slot in &mut filled.data {
+                            if self.data_pointer >= self.data_values.len() {
+                                return Err(HtBasicError::RuntimeError {
+                                    message: "READ past end of DATA".to_string(),
+                                    span: None,
+                                });
+                            }
+                            *slot = self.data_values[self.data_pointer].clone();
+                            self.data_pointer += 1;
+                        }
+                        self.scope.set(var, Value::Array(filled));
+                        continue;
+                    }
                     if self.data_pointer >= self.data_values.len() {
                         return Err(HtBasicError::RuntimeError {
                             message: "READ past end of DATA".to_string(),
@@ -793,11 +934,18 @@ impl Interpreter {
                             self.io.assign_device(&path_name, "GPIB", addr);
                             self.gpib_paths.insert(path_name.to_uppercase(), gpib_addr);
                             if !self.gpib.has_device(gpib_addr) {
-                                self.gpib.add_device(gpib_addr, Box::new(crate::runtime::gpib::Dmm::new()));
+                                self.gpib.add_device(
+                                    gpib_addr,
+                                    Box::new(crate::runtime::gpib::Dmm::new()),
+                                );
                             }
                         } else {
                             self.io.assign_device(&path_name, "GPIB", addr);
                         }
+                    } else if val == "*" {
+                        // ASSIGN @name TO * — release the path.
+                        self.io.release(&path_name);
+                        self.gpib_paths.remove(&path_name.to_uppercase());
                     } else if val.starts_with("BUFFER") {
                         self.io.assign_buffer(&path_name, 256);
                     } else {
@@ -809,7 +957,10 @@ impl Interpreter {
                     if let Some(gpib_addr) = self.resolve_gpib(&path_name) {
                         let response = self.gpib.output(gpib_addr, val);
                         if !response.is_empty() {
-                            self.scope.set(&format!("__gpib_resp_{}", path_name), Value::string(&response));
+                            self.scope.set(
+                                &format!("__gpib_resp_{}", path_name),
+                                Value::string(&response),
+                            );
                         }
                     } else if let Err(e) = self.io.output(&path_name, val) {
                         return self.runtime_error(710, &format!("OUTPUT: {}", e));
@@ -849,7 +1000,10 @@ impl Interpreter {
                     let rest = key.trim_start_matches("STATUS @").trim().to_string();
                     let parts: Vec<&str> = rest.split(',').map(|s| s.trim()).collect();
                     if parts.len() >= 2 {
-                        if let (Some(addr), Ok(reg)) = (crate::runtime::gpib::parse_gpib_address(parts[0]), parts[1].parse::<u8>()) {
+                        if let (Some(addr), Ok(reg)) = (
+                            crate::runtime::gpib::parse_gpib_address(parts[0]),
+                            parts[1].parse::<u8>(),
+                        ) {
                             let status_val = self.gpib.status(addr, reg);
                             self.output.push(status_val.to_string());
                         }
@@ -941,6 +1095,15 @@ impl Interpreter {
                     }
                 } else {
                     Ok(Value::string(""))
+                }
+            },
+            // Whole-array reference A(*) — evaluates to the array value
+            // itself (e.g. `PRINT A(*)` prints all elements).
+            Expr::WholeArray(name, _) => {
+                if let Some(val) = self.scope.get(name) {
+                    Ok(val)
+                } else {
+                    Ok(Value::Real(0.0))
                 }
             },
             Expr::ArrayRef(name, subscripts, _span) => {
@@ -1390,9 +1553,12 @@ impl Interpreter {
                     self.scope.set(name, Value::Array(new_arr));
                 }
             },
-            MatOp::Reduc(dest, func, src, _) => {
+            MatOp::Reduc(dest, func, src, vector, subscript, _) => {
                 let arr = self.get_array(src);
-                let result = self.mat_reduction(*func, &arr);
+                let result = match func {
+                    ReducFunc::Reorder => self.mat_reorder(&arr, vector.as_deref(), *subscript),
+                    _ => self.mat_reduction(*func, &arr),
+                };
                 self.scope.set(dest, Value::Array(result));
             },
         }
@@ -1612,7 +1778,79 @@ impl Interpreter {
                     ArrayData::new(vec![])
                 }
             },
+            ReducFunc::Sort => {
+                // MAT SORT A(*) — ascending sort, array overwritten in place.
+                let mut result = arr.clone();
+                result.data.sort_by(|a, b| {
+                    a.as_real()
+                        .partial_cmp(&b.as_real())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                result
+            },
+            ReducFunc::SortDesc => {
+                // MAT SORT A(*) DESC (mat sort.prg).
+                let mut result = arr.clone();
+                result.data.sort_by(|a, b| {
+                    b.as_real()
+                        .partial_cmp(&a.as_real())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                result
+            },
+            ReducFunc::Reorder => arr.clone(),
         }
+    }
+
+    /// MAT REORDER M BY V[,n] — reorder one subscript of `arr` (default 1 =
+    /// first dimension) so its elements appear in the order given by the
+    /// integer values in vector V (1-based subscripts of the target dim).
+    fn mat_reorder(&self, arr: &ArrayData, vector: Option<&str>, subscript: Option<i64>) -> ArrayData {
+        let Some(by_name) = vector else {
+            return arr.clone();
+        };
+        let by = self.get_array(by_name);
+        let rank = arr.dims.len();
+        if rank != 2 || by.data.is_empty() {
+            return arr.clone();
+        }
+        let rows = (arr.dims[0].1 - arr.dims[0].0 + 1) as usize;
+        let cols = (arr.dims[1].1 - arr.dims[1].0 + 1) as usize;
+        let dim = match subscript.unwrap_or(1) {
+            2 => 1,
+            _ => 0,
+        };
+        let mut result = arr.clone();
+        if dim == 1 {
+            // Reorder columns: result[r][k] = arr[r][V(k)]
+            for r in 0..rows {
+                for k in 0..cols {
+                    let idx = by
+                        .data
+                        .get(k)
+                        .map(|v| v.as_real() as i64 - 1)
+                        .unwrap_or(k as i64);
+                    let col = idx.clamp(0, cols as i64 - 1) as usize;
+                    let val = arr.data.get(r * cols + col).cloned().unwrap_or(Value::Null);
+                    result.data[r * cols + k] = val;
+                }
+            }
+        } else {
+            // Reorder rows: result[k][c] = arr[V(k)][c]
+            for k in 0..rows {
+                let idx = by
+                    .data
+                    .get(k)
+                    .map(|v| v.as_real() as i64 - 1)
+                    .unwrap_or(k as i64);
+                let row = idx.clamp(0, rows as i64 - 1) as usize;
+                for c in 0..cols {
+                    let val = arr.data.get(row * cols + c).cloned().unwrap_or(Value::Null);
+                    result.data[k * cols + c] = val;
+                }
+            }
+        }
+        result
     }
 
     fn format_array(&self, arr: &ArrayData) -> String {
@@ -1733,9 +1971,10 @@ impl Interpreter {
         self.last_err_line = self.pc as i64;
         self.last_err_msg = msg.to_string();
         if let Some(ref handler_label) = self.error_handler.clone() {
-            // Jump to error handler (like GOSUB)
+            // Jump to error handler (like GOSUB). RETURN from the handler
+            // resumes at the statement AFTER the one that raised the error.
             self.call_stack.push(CallFrame {
-                return_pc: self.pc, // resume after error
+                return_pc: self.pc + 1,
                 local_scope: self.scope.clone(),
             });
             if let Some(idx) = self.find_label(&handler_label) {
@@ -1791,10 +2030,17 @@ impl Interpreter {
             };
             local_scope.set(&param.name, val);
         }
+        // OPTIONAL — number of optional arguments actually passed
+        // (fn.prg: `IF OPTIONAL=0 THEN RETURN "You didn't use the
+        // OPTIONAL parameter."`).
+        let optional_passed = args.len().saturating_sub(func_def.required_params);
+        local_scope.set("OPTIONAL", Value::Integer(optional_passed as i64));
         self.scope = local_scope;
 
         // Execute FN body directly (tree-walking)
         let mut result = Value::Real(0.0);
+        let saved_fn_return = self.fn_return.take();
+        self.fn_return = Some(FnReturn::Armed);
         for stmt in &func_def.body {
             match stmt {
                 Stmt::Return(ref expr, _) => {
@@ -1805,9 +2051,20 @@ impl Interpreter {
                 },
                 _ => {
                     self.execute_stmt(stmt)?;
+                    // A RETURN nested inside control flow (e.g. a single-line
+                    // IF) was captured by the Stmt::Return handler.
+                    match self.fn_return.clone() {
+                        Some(FnReturn::Fired(Some(val))) => {
+                            result = val;
+                            break;
+                        },
+                        Some(FnReturn::Fired(None)) => break, // bare RETURN
+                        _ => {},
+                    }
                 },
             }
         }
+        self.fn_return = saved_fn_return;
 
         // Restore state (trim any extra call frames from nested GOSUBs)
         while self.call_stack.len() > saved_call_stack_len {
@@ -1874,8 +2131,16 @@ impl Interpreter {
             Viewport(x1, x2, y1, y2) => {
                 self.graphics.viewport = (x1, x2, y1, y2);
             },
-            Rectangle(x1, y1, x2, y2, fill, edge) => {
-                self.graphics.rectangle(x1, y1, x2, y2, fill, edge);
+            Rectangle(w, h, fill, edge) => {
+                self.graphics.rectangle_rel(w, h, fill, edge);
+            },
+            PolygonReg(radius, chords, fill, edge) => {
+                let (total, drawn) = chords.unwrap_or((60.0, 60.0));
+                self.graphics.polygon_regular(radius, total, drawn, fill, edge);
+            },
+            PolylineReg(radius, chords) => {
+                let (total, drawn) = chords.unwrap_or((60.0, 60.0));
+                self.graphics.polyline_regular(radius, total, drawn);
             },
             Polygon(ref pts) => self.graphics.polygon(pts),
             Polyline(ref pts) => self.graphics.polyline(pts),
@@ -1986,6 +2251,7 @@ impl Interpreter {
 
         // Preserve I/O state and output
         new_interp.io = saved_io;
+        new_interp.io_pending = std::mem::take(&mut self.io_pending);
         new_interp.output = saved_output;
         new_interp.graphics = std::mem::take(&mut self.graphics);
 
@@ -1996,6 +2262,7 @@ impl Interpreter {
         self.output = new_interp.output;
         self.graphics = std::mem::take(&mut new_interp.graphics);
         self.io = std::mem::take(&mut new_interp.io);
+        self.io_pending = std::mem::take(&mut new_interp.io_pending);
 
         result.map(|_| ())
     }

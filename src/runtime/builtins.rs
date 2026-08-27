@@ -372,7 +372,10 @@ impl Builtins {
         // Complex numbers are represented as two-element arrays or (real, imag) pairs.
         // CMPLX(real, imag) — create complex from two scalars
         self.register("CMPLX", 2, |args| {
-            let vals = vec![Value::Real(args[0].as_real()), Value::Real(args[1].as_real())];
+            let vals = vec![
+                Value::Real(args[0].as_real()),
+                Value::Real(args[1].as_real()),
+            ];
             Value::Array(ArrayData {
                 dims: vec![(0, 1)],
                 data: vals,
@@ -397,7 +400,7 @@ impl Builtins {
                     dims: vec![(0, 1)],
                     data: vec![Value::Real(re), Value::Real(im)],
                 })
-            }
+            },
             v => v.clone(),
         });
         // ARG(z) — phase angle in radians
@@ -419,7 +422,7 @@ impl Builtins {
             Value::Array(ref arr) => {
                 let sum: f64 = arr.data.iter().map(|v| v.as_real()).sum();
                 Value::Real(sum)
-            }
+            },
             v => Value::Real(v.as_real()),
         });
         // MEAN(array) — arithmetic mean
@@ -427,7 +430,7 @@ impl Builtins {
             Value::Array(ref arr) if !arr.data.is_empty() => {
                 let sum: f64 = arr.data.iter().map(|v| v.as_real()).sum();
                 Value::Real(sum / arr.data.len() as f64)
-            }
+            },
             v => Value::Real(v.as_real()),
         });
         // MEDIAN(array) — median value
@@ -442,7 +445,7 @@ impl Builtins {
                     vals[mid]
                 };
                 Value::Real(med)
-            }
+            },
             v => Value::Real(v.as_real()),
         });
         // STD(array) — population standard deviation
@@ -450,12 +453,17 @@ impl Builtins {
             Value::Array(ref arr) if arr.data.len() > 1 => {
                 let n = arr.data.len() as f64;
                 let mean: f64 = arr.data.iter().map(|v| v.as_real()).sum::<f64>() / n;
-                let variance: f64 = arr.data.iter().map(|v| {
-                    let d = v.as_real() - mean;
-                    d * d
-                }).sum::<f64>() / n;
+                let variance: f64 = arr
+                    .data
+                    .iter()
+                    .map(|v| {
+                        let d = v.as_real() - mean;
+                        d * d
+                    })
+                    .sum::<f64>()
+                    / n;
                 Value::Real(variance.sqrt())
-            }
+            },
             _ => Value::Real(0.0),
         });
 
@@ -463,26 +471,26 @@ impl Builtins {
         // FFT(real_array, imag_array) — forward FFT
         self.register("FFT", 2, |args| {
             // Stub: return input unchanged
-            let re = match &args[0] { Value::Array(ref a) => a.clone(), _ => ArrayData::new(vec![]) };
+            let re = match &args[0] {
+                Value::Array(ref a) => a.clone(),
+                _ => ArrayData::new(vec![]),
+            };
             Value::Array(re)
         });
         // IFFT(real_array, imag_array) — inverse FFT (stub)
-        self.register("IFFT", 2, |args| {
-            match &args[0] { Value::Array(ref a) => Value::Array(a.clone()), _ => Value::Real(0.0) }
+        self.register("IFFT", 2, |args| match &args[0] {
+            Value::Array(ref a) => Value::Array(a.clone()),
+            _ => Value::Real(0.0),
         });
         // CFFT(complex_array) — complex FFT
-        self.register("CFFT", 1, |args| {
-            match &args[0] {
-                Value::Array(ref arr) => Value::Array(arr.clone()),
-                _ => Value::Real(0.0),
-            }
+        self.register("CFFT", 1, |args| match &args[0] {
+            Value::Array(ref arr) => Value::Array(arr.clone()),
+            _ => Value::Real(0.0),
         });
         // ICFFT(complex_array) — inverse complex FFT
-        self.register("ICFFT", 1, |args| {
-            match &args[0] {
-                Value::Array(ref arr) => Value::Array(arr.clone()),
-                _ => Value::Real(0.0),
-            }
+        self.register("ICFFT", 1, |args| match &args[0] {
+            Value::Array(ref arr) => Value::Array(arr.clone()),
+            _ => Value::Real(0.0),
         });
     }
 }

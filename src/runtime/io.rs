@@ -57,6 +57,28 @@ impl IoRegistry {
             filename.to_string()
         };
 
+        // Built-in device names — never open a file for these.
+        if fname.eq_ignore_ascii_case("CRT") {
+            self.paths.insert(
+                name.to_string(),
+                IoPath {
+                    handle: IoHandle::Crt,
+                    is_open: true,
+                },
+            );
+            return Ok(());
+        }
+        if fname.eq_ignore_ascii_case("KBD") {
+            self.paths.insert(
+                name.to_string(),
+                IoPath {
+                    handle: IoHandle::Kbd,
+                    is_open: true,
+                },
+            );
+            return Ok(());
+        }
+
         let handle = match mode.to_uppercase().as_str() {
             "OUTPUT" | "WRITE" => {
                 let file = OpenOptions::new()
@@ -229,6 +251,19 @@ impl IoRegistry {
     /// Check if a path exists.
     pub fn exists(&self, name: &str) -> bool {
         self.paths.contains_key(name)
+    }
+
+    /// True if the path is assigned to the console (CRT).
+    pub fn is_crt(&self, name: &str) -> bool {
+        self.paths
+            .get(name)
+            .map(|p| matches!(p.handle, IoHandle::Crt))
+            .unwrap_or(false)
+    }
+
+    /// Release a path (`ASSIGN @name TO *`).
+    pub fn release(&mut self, name: &str) {
+        self.paths.remove(name);
     }
 
     /// Set mass storage volume.

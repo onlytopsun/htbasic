@@ -25,6 +25,8 @@ pub enum Stmt {
     Print(Vec<PrintItem>, Span),
     /// PRINT USING format; expr [,;] expr ...
     PrintUsing(Expr, Vec<Expr>, Span),
+    /// OUTPUT @path; expr [,;] expr ... (write to an I/O path/device)
+    Output(String, Vec<PrintItem>, Span),
     /// IF cond THEN ... [ELSE ...] END IF (multi-line form)
     If(IfBlock, Span),
     /// Single-line IF: IF cond THEN stmt [ELSE stmt]
@@ -120,7 +122,13 @@ pub enum GfxCmd {
     ClipOff,
     Window(f64, f64, f64, f64),
     Viewport(f64, f64, f64, f64),
-    Rectangle(f64, f64, f64, f64, bool, bool), // x1,y1,x2,y2, fill, edge
+    // RECTANGLE w,h[,FILL][,EDGE] — width/height displacement from the
+    // current pen position (HTBasic has no 4-coordinate form).
+    Rectangle(f64, f64, bool, bool), // width, height, fill, edge
+    // POLYGON radius[,total[,drawn]][,FILL][,EDGE] — regular polygon.
+    PolygonReg(f64, Option<(f64, f64)>, bool, bool), // radius, Some((total,drawn)), fill, edge
+    // POLYLINE radius[,total[,drawn]] — regular polyline (no fill/edge).
+    PolylineReg(f64, Option<(f64, f64)>), // radius, Some((total, drawn))
     Polygon(Vec<(f64, f64)>),
     Polyline(Vec<(f64, f64)>),
     Gload(String),
@@ -240,8 +248,15 @@ pub enum MatOp {
     Print(String, Span),
     /// MAT READ A
     Read(String, Span),
-    /// MAT A = RSUM(B) or CSUM(B)
-    Reduc(String, ReducFunc, String, Span),
+    /// MAT A = RSUM(B) or CSUM(B); MAT REORDER M BY V,n / MAT SORT A TO V
+    Reduc(
+        String,
+        ReducFunc,
+        String,
+        Option<String>, // BY/TO vector (SORT order output, REORDER order input)
+        Option<i64>,    // subscript to reorder (REORDER only)
+        Span,
+    ),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -266,6 +281,12 @@ pub enum MatFunc {
 pub enum ReducFunc {
     Rsum,
     Csum,
+    /// MAT SORT A(*)
+    Sort,
+    /// MAT SORT A(*) DESC (mat sort.prg)
+    SortDesc,
+    /// MAT REORDER M BY V,n
+    Reorder,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +304,8 @@ pub enum Expr {
     Variable(String, Span),
     StringVariable(String, Span),
     ArrayRef(String, Vec<Expr>, Span),
+    /// Whole-array reference: A(*) or A$(*)
+    WholeArray(String, Span),
     /// Function call: FNname(args)
     FnCall(String, Vec<Expr>, Span),
     /// String function: FNname$(args)
@@ -350,6 +373,9 @@ pub struct FnDef {
     pub name: String,
     pub returns_string: bool,
     pub params: Vec<Param>,
+    /// Number of required (pre-OPTIONAL) parameters — params to the right
+    /// of the OPTIONAL keyword need not be passed (fn.prg).
+    pub required_params: usize,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

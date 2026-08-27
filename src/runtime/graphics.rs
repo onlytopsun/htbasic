@@ -335,6 +335,65 @@ impl GraphicsState {
         }
     }
 
+    /// RECTANGLE w,h — rectangle described by width/height displacement
+    /// from the current pen position. The sign of each dimension decides
+    /// the pen position after execution (left/lower corner for positive,
+    /// right/upper for negative).
+    pub fn rectangle_rel(&mut self, w: f64, h: f64, fill: bool, edge: bool) {
+        let x1 = self.pen_x;
+        let y1 = self.pen_y;
+        self.rectangle(x1, y1, x1 + w, y1 + h, fill, edge);
+        self.pen_x = if w >= 0.0 { x1 } else { x1 + w };
+        self.pen_y = if h >= 0.0 { y1 } else { y1 + h };
+    }
+
+    /// Vertices of a regular polygon/polyline: `drawn` of `total` chord
+    /// segments, radius from the current pen position, starting on the
+    /// positive X axis (PDIR can rotate this — not implemented).
+    fn regular_vertices(&self, radius: f64, total: f64, drawn: f64) -> Vec<(f64, f64)> {
+        let n = drawn.floor().max(1.0) as usize;
+        let total = total.max(1.0);
+        (0..n)
+            .map(|i| {
+                let theta = 2.0 * std::f64::consts::PI * (i as f64) / total;
+                (
+                    self.pen_x + radius * theta.cos(),
+                    self.pen_y + radius * theta.sin(),
+                )
+            })
+            .collect()
+    }
+
+    /// POLYGON radius[,total[,drawn]][,FILL|EDGE] — regular polygon.
+    /// The pen starts and ends in the same position and ends up.
+    pub fn polygon_regular(&mut self, radius: f64, total: f64, drawn: f64, fill: bool, edge: bool) {
+        let pts = self.regular_vertices(radius, total, drawn);
+        if fill && pts.len() >= 3 {
+            self.polygon(&pts);
+        } else if edge {
+            let n = pts.len();
+            for i in 0..n {
+                let (x1, y1) = pts[i];
+                let (x2, y2) = pts[(i + 1) % n];
+                self.line(x1, y1, x2, y2);
+            }
+        }
+        self.pen_down = false;
+    }
+
+    /// POLYLINE radius[,total[,drawn]] — open regular polyline (no
+    /// fill/edge options).
+    pub fn polyline_regular(&mut self, radius: f64, total: f64, drawn: f64) {
+        let pts = self.regular_vertices(radius, total, drawn);
+        let n = pts.len();
+        for i in 1..n {
+            let (x1, y1) = pts[i - 1];
+            let (x2, y2) = pts[i];
+            self.line(x1, y1, x2, y2);
+        }
+        self.pen_down = false;
+    }
+
     /// POLYGON — draw filled polygon from array of points.
     pub fn polygon(&mut self, points: &[(f64, f64)]) {
         if points.len() < 3 {

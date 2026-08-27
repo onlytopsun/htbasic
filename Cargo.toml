@@ -15,6 +15,7 @@ rustyline = "15"
 [features]
 default = []
 graphics = []
+htbwin-fixtures = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

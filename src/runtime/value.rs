@@ -38,7 +38,12 @@ impl Value {
             Value::Integer(n) => n.to_string(),
             Value::String_(s) => s.to_string(),
             Value::Array(arr) => {
-                format!("Array({} dims)", arr.dims.len())
+                // Row-major listing: `PRINT A(*)` → `12 15 18`.
+                arr.data
+                    .iter()
+                    .map(|v| v.to_display_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             },
             Value::Null => "".to_string(),
         }

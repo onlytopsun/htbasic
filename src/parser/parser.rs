@@ -51,13 +51,20 @@ pub struct Parser {
     lexer: Lexer,
     /// Lookahead token
     current: Token,
+    /// Full source text, for raw-text capture (IMAGE formats).
+    source: String,
 }
 
 impl Parser {
     pub fn new(source: String) -> Self {
+        let src = source.clone();
         let mut lexer = Lexer::new(source);
         let current = lexer.advance();
-        Self { lexer, current }
+        Self {
+            lexer,
+            current,
+            source: src,
+        }
     }
 
     // ===================== Helpers =====================
@@ -111,13 +118,21 @@ impl Parser {
 
         // Parse main program statements until END or EOF
         while !matches!(self.current.kind, TokenKind::Eof | TokenKind::End) {
-            if matches!(self.current.kind, TokenKind::Sub) {
-                // Subprogram definitions after END
-                // If we see SUB before END, treat remaining statements as the main body
-                // and then parse SUBs
-                break;
-            }
-            if matches!(self.current.kind, TokenKind::DefFn) {
+            // Subprogram / function sections — possibly behind a line number
+            // (`10 SUB Foo(...)`). If we see SUB/DEF FN before END, treat
+            // remaining statements as the main body and then parse SUBs.
+            let section_start = matches!(self.current.kind, TokenKind::Sub | TokenKind::DefFn)
+                || (matches!(self.current.kind, TokenKind::IntegerLiteral(_))
+                    && matches!(self.lexer.peek().kind, TokenKind::Sub | TokenKind::DefFn));
+            if section_start {
+                if matches!(self.current.kind, TokenKind::IntegerLiteral(_)) {
+                    if let TokenKind::IntegerLiteral(ref n) = self.current.kind {
+                        let num = n.to_string();
+                        statements.push(Stmt::Rem(format!("__label__{}", num), Span::new(0, 0)));
+                    }
+                    self.advance();
+                    self.skip_newlines();
+                }
                 break;
             }
 
@@ -147,6 +162,17 @@ impl Parser {
                 },
                 TokenKind::Eof => break,
                 _ => {
+                    // SUB/DEF FN behind a line number (`140 SUB Prtmat(...)`).
+                    if matches!(self.current.kind, TokenKind::IntegerLiteral(_))
+                        && matches!(self.lexer.peek().kind, TokenKind::Sub | TokenKind::DefFn)
+                    {
+                        if let TokenKind::IntegerLiteral(ref n) = self.current.kind {
+                            let num = n.to_string();
+                            statements.push(Stmt::Rem(format!("__label__{}", num), Span::new(0, 0)));
+                        }
+                        self.advance();
+                        continue;
+                    }
                     // Labels and statements after END are valid for GOSUB/GOTO targets.
                     // Parse them and add to main program statements.
                     if let Ok(stmts) = self.parse_statement_or_line() {
@@ -169,6 +195,18 @@ impl Parser {
     fn parse_statement_or_line(&mut self) -> Result<Vec<Stmt>> {
         let mut stmts = Vec::new();
 
+        // Line number at the start of a line: register it as a jump target
+        // (`GOTO 380`) and skip. Converted TransEra programs use line
+        // numbers for every line.
+        if let TokenKind::IntegerLiteral(ref n) = self.current.kind {
+            let num = n.to_string();
+            self.advance();
+            stmts.push(Stmt::Rem(format!("__label__{}", num), Span::new(0, 0)));
+            if matches!(self.current.kind, TokenKind::Newline | TokenKind::Eof) {
+                return Ok(stmts);
+            }
+        }
+
         // Check for label at start of line
         if let TokenKind::LabelDef(ref label) = self.current.kind {
             let label_name = label.clone();
@@ -187,9 +225,11 @@ impl Parser {
 
         stmts.push(self.parse_statement()?);
 
-        // Handle colon-separated multi-statement lines
-        while matches!(self.current.kind, TokenKind::Colon) {
-            self.advance(); // consume colon
+        // Handle colon- and semicolon-separated multi-statement lines
+        // (HP BASIC accepts `;` as a statement separator, e.g.
+        // `PLOTTER IS CRT,"INTERNAL"; COLOR MAP`).
+        while matches!(self.current.kind, TokenKind::Colon | TokenKind::Semicolon) {
+            self.advance(); // consume separator
             self.skip_newlines();
             if !matches!(self.current.kind, TokenKind::Newline | TokenKind::Eof) {
                 stmts.push(self.parse_statement()?);
@@ -197,6 +237,25 @@ impl Parser {
         }
 
         Ok(stmts)
+    }
+
+    /// Converted TransEra programs put a line number on every line,
+    /// including block terminators (`260 NEXT Row`, `340 END WHILE`).
+    /// If the current token is a line number immediately followed by one
+    /// of `kinds`, consume the line number and return a label statement
+    /// for it; the caller inserts the label and then sees the keyword
+    /// as the current token. Returns None otherwise (position unchanged).
+    fn consume_labeled_kw(&mut self, kinds: &[TokenKind]) -> Option<Stmt> {
+        if let TokenKind::IntegerLiteral(ref n) = self.current.kind {
+            if kinds.iter().any(|k| {
+                std::mem::discriminant(&self.lexer.peek().kind) == std::mem::discriminant(k)
+            }) {
+                let num = n.to_string();
+                self.advance();
+                return Some(Stmt::Rem(format!("__label__{}", num), Span::new(0, 0)));
+            }
+        }
+        None
     }
 
     // ===================== Statements =====================
@@ -209,6 +268,14 @@ impl Parser {
             TokenKind::Rem => {
                 let span = self.span();
                 self.advance();
+                // REM consumes the rest of the line (a colon starts a new
+                // statement on the same line).
+                while !matches!(
+                    self.current.kind,
+                    TokenKind::Newline | TokenKind::Eof | TokenKind::Colon
+                ) {
+                    self.advance();
+                }
                 Ok(Stmt::Rem(String::new(), span))
             },
             TokenKind::Bang => {
@@ -242,7 +309,24 @@ impl Parser {
             },
             TokenKind::GoTo => self.parse_goto(),
             TokenKind::GoSub => self.parse_gosub(),
-            TokenKind::On => self.parse_on(),
+            TokenKind::Next => {
+                // Standalone NEXT (array-iteration form when the FOR body
+                // does not capture it) — consume and ignore.
+                let span = self.span();
+                self.advance();
+                if matches!(self.current.kind, TokenKind::Identifier(_)) {
+                    self.advance();
+                    if matches!(self.current.kind, TokenKind::LParen) {
+                        self.advance();
+                        if matches!(self.current.kind, TokenKind::Star) {
+                            self.advance();
+                        }
+                        self.expect(TokenKind::RParen)?;
+                    }
+                }
+                Ok(Stmt::Rem("NEXT".into(), span))
+            },
+            TokenKind::On | TokenKind::OnError => self.parse_on(),
             TokenKind::Return => {
                 let span = self.span();
                 self.advance();
@@ -264,7 +348,23 @@ impl Parser {
             TokenKind::Image => {
                 let span = self.span();
                 self.advance();
-                let format = self.expect_string()?;
+                // IMAGE formats are free-form text (e.g.
+                // `IMAGE 3("[",3DD.DD,"]",/)`) that does not tokenize as
+                // an expression; capture the raw source text to end of
+                // line instead.
+                let start = if matches!(self.current.kind, TokenKind::Newline | TokenKind::Eof)
+                {
+                    span.end
+                } else {
+                    self.current.span.start
+                };
+                let mut end = start;
+                while !matches!(self.current.kind, TokenKind::Newline | TokenKind::Eof) {
+                    end = self.current.span.end;
+                    self.advance();
+                }
+                let format = self.source[start.min(self.source.len())..end.min(self.source.len())]
+                    .to_string();
                 Ok(Stmt::Image(format, span))
             },
             TokenKind::Input_ => self.parse_input(),
@@ -275,7 +375,27 @@ impl Parser {
             TokenKind::Disp => {
                 let span = self.span();
                 self.advance();
-                let msg = self.expect_string()?;
+                // DISP [expr|"text"] — the argument is optional (bare
+                // `DISP` cancels the message line) and may be an
+                // expression, not just a string literal.
+                let msg = if matches!(
+                    self.current.kind,
+                    TokenKind::Newline
+                        | TokenKind::Eof
+                        | TokenKind::Colon
+                        | TokenKind::Semicolon
+                ) {
+                    String::new()
+                } else if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
+                    self.expect_string()?
+                } else {
+                    let start = self.current.span.start;
+                    let _ = self.parse_expression()?;
+                    let end = self.current.span.start;
+                    self.source[start.min(self.source.len())..end.min(self.source.len())]
+                        .trim()
+                        .to_string()
+                };
                 Ok(Stmt::Disp(msg, span))
             },
             TokenKind::Assign => self.parse_assign(),
@@ -344,12 +464,15 @@ impl Parser {
                 let mut key_parts = vec![self.expect_identifier()?];
                 // Consume additional key words until we hit a non-identifier or end of line
                 while matches!(self.current.kind, TokenKind::Identifier(_)) {
-                    let next = self.current.kind.name();
+                    let next = match &self.current.kind {
+                        TokenKind::Identifier(s) => s.to_uppercase(),
+                        _ => break,
+                    };
                     // Stop at keywords that indicate a new statement
                     let stop_words = [
                         "PRINT", "IF", "FOR", "WHILE", "GOTO", "GOSUB", "CALL", "END", "DIM",
                     ];
-                    if stop_words.contains(&next) {
+                    if stop_words.contains(&next.as_str()) {
                         break;
                     }
                     key_parts.push(self.expect_identifier()?);
@@ -364,7 +487,10 @@ impl Parser {
                         let mut parts = vec![v];
                         while !matches!(
                             self.current.kind,
-                            TokenKind::Newline | TokenKind::Eof | TokenKind::Colon
+                            TokenKind::Newline
+                                | TokenKind::Eof
+                                | TokenKind::Colon
+                                | TokenKind::Semicolon
                         ) {
                             if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
                                 parts.push(self.expect_string()?);
@@ -380,6 +506,28 @@ impl Parser {
                     },
                     TokenKind::IntegerLiteral(_) => self.expect_integer()?.to_string(),
                     TokenKind::Identifier(_) => self.expect_identifier()?,
+                    // `CONFIGURE MSI ON` / `CONFIGURE SAVE ASCII ON` — ON is
+                    // a keyword token, not an identifier.
+                    TokenKind::On => {
+                        self.advance();
+                        "ON".to_string()
+                    },
+                    // `CONFIGURE DUMP TO "PCL"` — keyword plus value parts.
+                    TokenKind::To => {
+                        self.advance();
+                        let mut parts = vec!["TO".to_string()];
+                        while matches!(
+                            self.current.kind,
+                            TokenKind::StringLiteral(_) | TokenKind::Identifier(_)
+                        ) {
+                            if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
+                                parts.push(self.expect_string()?);
+                            } else {
+                                parts.push(self.expect_identifier()?);
+                            }
+                        }
+                        parts.join(" ")
+                    },
                     _ => String::new(),
                 };
                 Ok(Stmt::Configure(key, value, span))
@@ -397,8 +545,27 @@ impl Parser {
                 } else if kw == "DISABLE" {
                     Ok(Stmt::Configure("DISABLE".into(), "".into(), span))
                 } else {
-                    // OFF KEY, OFF CYCLE, etc.
-                    let event = self.expect_identifier()?;
+                    // OFF KEY, OFF CYCLE, OFF END @File, etc. — event names
+                    // can be word-like keyword tokens (END) as well as
+                    // identifiers.
+                    let event = match &self.current.kind {
+                        TokenKind::Identifier(s) | TokenKind::StringIdentifier(s) => {
+                            let e = s.clone();
+                            self.advance();
+                            e
+                        },
+                        TokenKind::End => {
+                            self.advance();
+                            "END".to_string()
+                        },
+                        _ => {
+                            return Err(HtBasicError::ParseError {
+                                expected: "identifier".into(),
+                                found: self.current.kind.name().into(),
+                                span: self.span(),
+                            });
+                        },
+                    };
                     Ok(Stmt::Configure(
                         format!("OFF {}", event.to_uppercase()),
                         "".into(),
@@ -435,6 +602,14 @@ impl Parser {
                             | "READIO"
                             | "WRITEIO"
                             | "RESET"
+                            | "GRAPHICS"
+                            | "ALPHA"
+                            | "KBD"
+                            | "TRACK"
+                            | "DISPLAY"
+                            | "SYMBOL"
+                            | "KEY"
+                            | "TRACE"
                     )
                 } =>
             {
@@ -502,8 +677,8 @@ impl Parser {
             let name = self.expect_identifier_or_string()?;
             let mut dimensions = Vec::new();
 
-            if matches!(self.current.kind, TokenKind::LParen) {
-                self.advance(); // (
+            if matches!(self.current.kind, TokenKind::LParen | TokenKind::LBracket) {
+                self.advance(); // ( or [
                 loop {
                     let lower = if matches!(self.current.kind, TokenKind::IntegerLiteral(_)) {
                         let n = self.expect_integer()?;
@@ -526,7 +701,16 @@ impl Parser {
                         break;
                     }
                 }
-                self.expect(TokenKind::RParen)?;
+                // 03 00 dialect binaries pair `[` with `)`
+                // (`DIM Matrix[3,3)` — csum.prg).
+                if !matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket) {
+                    return Err(HtBasicError::ParseError {
+                        expected: ") or ]".into(),
+                        found: self.current.kind.name().into(),
+                        span: self.span(),
+                    });
+                }
+                self.advance();
             }
 
             entries.push(DimEntry { name, dimensions });
@@ -706,6 +890,16 @@ impl Parser {
 
             loop {
                 self.skip_newlines();
+                // `340 END IF` — line number precedes the terminator.
+                if let Some(lbl) = self.consume_labeled_kw(&[
+                    TokenKind::Else,
+                    TokenKind::EndIf,
+                    TokenKind::SubEnd,
+                    TokenKind::FnEnd,
+                    TokenKind::End,
+                ]) {
+                    then_body.push(lbl);
+                }
                 match &self.current.kind {
                     TokenKind::Else => {
                         self.advance();
@@ -760,6 +954,53 @@ impl Parser {
         self.advance(); // FOR
 
         let var = self.expect_identifier()?;
+        if matches!(self.current.kind, TokenKind::LParen) {
+            // Array iteration: `FOR B(*)` ... `NEXT B(*)`. No counter or
+            // limits — iterate over the array elements. Represent as a
+            // 0..1 loop (parse-clean stand-in).
+            self.advance();
+            if matches!(self.current.kind, TokenKind::Star) {
+                self.advance();
+            }
+            self.expect(TokenKind::RParen)?;
+            self.skip_newlines();
+            let mut body = Vec::new();
+            loop {
+                self.skip_newlines();
+                // `260 NEXT B(*)` — line number precedes NEXT.
+                if let Some(lbl) = self.consume_labeled_kw(&[TokenKind::Next]) {
+                    body.push(lbl);
+                }
+                if matches!(self.current.kind, TokenKind::Next) {
+                    self.advance();
+                    // Optional array name and (*) after NEXT
+                    if matches!(self.current.kind, TokenKind::Identifier(_)) {
+                        self.advance();
+                        if matches!(self.current.kind, TokenKind::LParen) {
+                            self.advance();
+                            if matches!(self.current.kind, TokenKind::Star) {
+                                self.advance();
+                            }
+                            self.expect(TokenKind::RParen)?;
+                        }
+                    }
+                    break;
+                }
+                if matches!(self.current.kind, TokenKind::Eof) {
+                    break;
+                }
+                let stmts = self.parse_statement_or_line()?;
+                body.extend(stmts);
+            }
+            return Ok(Stmt::For(
+                var,
+                Expr::Integer(0, span),
+                Expr::Integer(1, span),
+                None,
+                body,
+                span,
+            ));
+        }
         self.expect(TokenKind::Eq)?;
         let start = self.parse_expression()?;
         self.expect(TokenKind::To)?;
@@ -777,11 +1018,22 @@ impl Parser {
         let mut body = Vec::new();
         loop {
             self.skip_newlines();
+            // `260 NEXT Row` — line number precedes NEXT.
+            if let Some(lbl) = self.consume_labeled_kw(&[TokenKind::Next]) {
+                body.push(lbl);
+            }
             if matches!(self.current.kind, TokenKind::Next) {
                 self.advance();
-                // Optionally consume variable name
+                // Optionally consume variable name and whole-array marker
                 if matches!(self.current.kind, TokenKind::Identifier(_)) {
                     self.advance();
+                    if matches!(self.current.kind, TokenKind::LParen) {
+                        self.advance();
+                        if matches!(self.current.kind, TokenKind::Star) {
+                            self.advance();
+                        }
+                        self.expect(TokenKind::RParen)?;
+                    }
                 }
                 break;
             }
@@ -840,10 +1092,20 @@ impl Parser {
 
         let expr = self.parse_expression()?;
 
-        let mut arms = Vec::new();
+        let mut arms: Vec<CaseArm> = Vec::new();
 
         loop {
             self.skip_newlines();
+            // `120 CASE 1` — line number precedes the CASE keyword.
+            if let Some(lbl) = self.consume_labeled_kw(&[
+                TokenKind::Case,
+                TokenKind::CaseElse,
+                TokenKind::EndSelect,
+            ]) {
+                if let Some(last) = arms.last_mut() {
+                    last.body.push(lbl);
+                }
+            }
             match &self.current.kind {
                 TokenKind::Case => {
                     self.advance();
@@ -862,7 +1124,29 @@ impl Parser {
                             // Parse as expression, check if it looks like "IS op expr"
                         }
 
-                        let val = self.parse_expression()?;
+                        // Relational shorthand: `CASE < 1` means
+                        // `CASE selectvar < 1` (HTBasic CASE EXAMPLE).
+                        let val = if matches!(
+                            self.current.kind,
+                            TokenKind::Lt
+                                | TokenKind::Gt
+                                | TokenKind::LtEq
+                                | TokenKind::GtEq
+                                | TokenKind::LtGt
+                        ) {
+                            let op = match self.current.kind {
+                                TokenKind::Lt => BinaryOp::Lt,
+                                TokenKind::Gt => BinaryOp::Gt,
+                                TokenKind::LtEq => BinaryOp::LtEq,
+                                TokenKind::GtEq => BinaryOp::GtEq,
+                                _ => BinaryOp::NotEq,
+                            };
+                            self.advance();
+                            let rhs = self.parse_expression()?;
+                            Expr::Binary(Box::new(expr.clone()), op, Box::new(rhs), span)
+                        } else {
+                            self.parse_expression()?
+                        };
 
                         if matches!(self.current.kind, TokenKind::To) {
                             self.advance();
@@ -883,6 +1167,13 @@ impl Parser {
                     let mut body = Vec::new();
                     loop {
                         self.skip_newlines();
+                        if let Some(lbl) = self.consume_labeled_kw(&[
+                            TokenKind::Case,
+                            TokenKind::CaseElse,
+                            TokenKind::EndSelect,
+                        ]) {
+                            body.push(lbl);
+                        }
                         match &self.current.kind {
                             TokenKind::Case | TokenKind::CaseElse | TokenKind::EndSelect => {
                                 break;
@@ -902,6 +1193,12 @@ impl Parser {
                     let mut body = Vec::new();
                     loop {
                         self.skip_newlines();
+                        if let Some(lbl) = self.consume_labeled_kw(&[
+                            TokenKind::Case,
+                            TokenKind::EndSelect,
+                        ]) {
+                            body.push(lbl);
+                        }
                         match &self.current.kind {
                             TokenKind::Case | TokenKind::EndSelect => break,
                             TokenKind::Eof => break,
@@ -978,20 +1275,45 @@ impl Parser {
         }
     }
 
+    /// Rest of `ON ERROR`: an optional GOTO with a line number, label,
+    /// string identifier, or I/O path target (`ON ERROR GOTO @File` —
+    /// assign.prg's name-table ref C7 00 resolves to @File).
+    fn parse_on_error_rest(&mut self, span: Span) -> Result<Stmt> {
+        if matches!(self.current.kind, TokenKind::GoTo) {
+            self.advance();
+            let label = match &self.current.kind {
+                TokenKind::IoPath(name) => {
+                    let n = name.clone();
+                    self.advance();
+                    n
+                },
+                TokenKind::StringIdentifier(name) => {
+                    let n = name.clone();
+                    self.advance();
+                    n
+                },
+                _ => self.expect_identifier_or_integer()?,
+            };
+            Ok(Stmt::GoTo(format!("__onerror__{}", label), span))
+        } else {
+            Ok(Stmt::Rem("ON ERROR".into(), span))
+        }
+    }
+
     fn parse_on(&mut self) -> Result<Stmt> {
         let span = self.span();
+        // The lexer may emit the `ON ERROR` compound as a single token, in
+        // which case the ERROR keyword is already consumed.
+        if matches!(self.current.kind, TokenKind::OnError) {
+            self.advance();
+            return self.parse_on_error_rest(span);
+        }
         self.advance(); // ON
 
         // Could be ON ERROR GOTO, ON expr GOTO, ON expr GOSUB, ON KEY, ON CYCLE, etc.
         if matches!(self.current.kind, TokenKind::OnError) {
             self.advance();
-            if matches!(self.current.kind, TokenKind::GoTo) {
-                self.advance();
-                let label = self.expect_identifier_or_integer()?;
-                Ok(Stmt::GoTo(format!("__onerror__{}", label), span))
-            } else {
-                Ok(Stmt::Rem("ON ERROR".into(), span))
-            }
+            return self.parse_on_error_rest(span);
         } else {
             // Check for event keywords (may be Identifier or keyword tokens like END, HALT)
             let event_kw = match &self.current.kind {
@@ -1001,17 +1323,102 @@ impl Parser {
                 _ => None,
             };
             let event_events = [
-                "KEY", "CYCLE", "KBD", "KNOB", "END", "HALT", "TIMEOUT", "SIGNAL",
+                "KEY", "CYCLE", "KBD", "KNOB", "END", "HALT", "TIMEOUT", "SIGNAL", "DELAY", "INTR",
+                "TIME",
             ];
             if let Some(ref kw) = event_kw {
                 if event_events.contains(&kw.as_str()) {
                     self.advance(); // consume event keyword
-                                    // Parse optional parameter (key number, cycle seconds, etc.)
+                    // Parse optional parameter: a key/cycle/instrument number,
+                    // a multi-number list (`ON INTR 7,1`), ALL (`ON KBD ALL`),
+                    // or a TIME expression (`ON TIME (TIMEDATE+X) MOD 86400`).
                     let param = if matches!(self.current.kind, TokenKind::IntegerLiteral(_)) {
-                        Some(self.expect_integer()?.to_string())
+                        let mut nums = vec![self.expect_integer()?.to_string()];
+                        // More integers follow only if the comma leads to
+                        // another number; `ON DELAY 3, GOTO` has no second
+                        // number before the response keyword.
+                        while matches!(self.current.kind, TokenKind::Comma) {
+                            self.advance();
+                            if matches!(self.current.kind, TokenKind::IntegerLiteral(_)) {
+                                nums.push(self.expect_integer()?.to_string());
+                            } else {
+                                break;
+                            }
+                        }
+                        Some(nums.join(","))
+                    } else if let TokenKind::IoPath(ref name) = self.current.kind {
+                        // `ON END @File GOTO Here` (on end.bas).
+                        let n = name.clone();
+                        self.advance();
+                        Some(format!("@{}", n))
+                    } else if let TokenKind::Identifier(ref id) = self.current.kind {
+                        if id.to_uppercase() == "ALL" {
+                            self.advance();
+                            Some("ALL".to_string())
+                        } else {
+                            None
+                        }
+                    } else if kw == "TIME"
+                        && !matches!(
+                            self.current.kind,
+                            TokenKind::GoTo
+                                | TokenKind::GoSub
+                                | TokenKind::Call
+                                | TokenKind::Newline
+                                | TokenKind::Eof
+                                | TokenKind::Colon
+                                | TokenKind::Semicolon
+                        )
+                    {
+                        // Expression parameter; capture its source text.
+                        let start = self.current.span.start;
+                        let _ = self.parse_expression()?;
+                        let end = self.current.span.start;
+                        Some(
+                            self.source[start.min(self.source.len())..end.min(self.source.len())]
+                                .trim()
+                                .to_string(),
+                        )
                     } else {
                         None
                     };
+                    // `ON DELAY 3, GOTO Here` — optional comma after the
+                    // event parameter.
+                    self.skip_comma();
+                    // `ON KEY 1,LABEL "text",CALL name` — softkey label form.
+                    if let TokenKind::Identifier(ref id) = self.current.kind {
+                        if id.to_uppercase() == "LABEL" {
+                            self.advance();
+                            let text = self.expect_string()?;
+                            self.skip_comma();
+                            let response = match &self.current.kind {
+                                TokenKind::GoTo => {
+                                    self.advance();
+                                    "GOTO".to_string()
+                                },
+                                TokenKind::GoSub => {
+                                    self.advance();
+                                    "GOSUB".to_string()
+                                },
+                                TokenKind::Call => {
+                                    self.advance();
+                                    "CALL".to_string()
+                                },
+                                _ => self.expect_identifier()?.to_uppercase(),
+                            };
+                            let label = self.expect_identifier_or_integer()?;
+                            let event_key = if let Some(ref p) = param {
+                                format!("ON {} {}", kw, p)
+                            } else {
+                                format!("ON {}", kw)
+                            };
+                            return Ok(Stmt::Configure(
+                                event_key,
+                                format!("LABEL {} {} {}", text, response, label),
+                                span,
+                            ));
+                        }
+                    }
                     // Parse response: GOTO/GOSUB/CALL label (or RECOVER)
                     let response = match &self.current.kind {
                         TokenKind::GoTo => {
@@ -1152,7 +1559,21 @@ impl Parser {
         let span = self.span();
         self.advance(); // PRINT USING
 
-        let format = self.parse_expression()?;
+        // `PRINT USING Image; Price` — the image may be a reference to an
+        // IMAGE statement, lexed as the Image keyword rather than an
+        // identifier. Capture its source text as the format operand.
+        let format = if matches!(self.current.kind, TokenKind::Image) {
+            let start = self.current.span.start;
+            self.advance();
+            Expr::String_(
+                self.source[start.min(self.source.len())..self.current.span.start.min(self.source.len())]
+                    .trim()
+                    .to_string(),
+                span,
+            )
+        } else {
+            self.parse_expression()?
+        };
         let mut exprs = Vec::new();
 
         if matches!(self.current.kind, TokenKind::Semicolon) {
@@ -1185,7 +1606,8 @@ impl Parser {
         // Optional prompt string
         let prompt = if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
             let s = self.expect_string()?;
-            if matches!(self.current.kind, TokenKind::Semicolon) {
+            // `,` also appears after INPUT/LINPUT prompts in converted files.
+            if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
                 self.advance();
             }
             Some(s)
@@ -1212,7 +1634,8 @@ impl Parser {
 
         let prompt = if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
             let s = self.expect_string()?;
-            if matches!(self.current.kind, TokenKind::Semicolon) {
+            // `,` also appears after INPUT/LINPUT prompts in converted files.
+            if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
                 self.advance();
             }
             Some(s)
@@ -1231,6 +1654,21 @@ impl Parser {
         let mut vars = Vec::new();
         loop {
             vars.push(self.expect_identifier()?);
+            // Whole-array read: READ A(*)
+            if matches!(self.current.kind, TokenKind::LParen) {
+                self.advance();
+                if matches!(self.current.kind, TokenKind::Star) {
+                    self.advance();
+                    self.expect(TokenKind::RParen)?;
+                } else {
+                    // Indexed read target (uncommon): keep the name, skip
+                    // the index expression(s).
+                    while !matches!(self.current.kind, TokenKind::RParen) {
+                        self.advance();
+                    }
+                    self.advance(); // )
+                }
+            }
             if matches!(self.current.kind, TokenKind::Comma) {
                 self.advance();
             } else {
@@ -1289,7 +1727,11 @@ impl Parser {
         if matches!(self.current.kind, TokenKind::IoPath(_)) {
             // Get the name from the IoPath token
             let path = match &self.current.kind {
-                TokenKind::IoPath(ref name) => { let n = name.clone(); self.advance(); n }
+                TokenKind::IoPath(ref name) => {
+                    let n = name.clone();
+                    self.advance();
+                    n
+                },
                 _ => self.expect_identifier()?,
             };
             // Skip optional TO keyword (either as keyword or identifier)
@@ -1300,14 +1742,32 @@ impl Parser {
                     self.advance();
                 }
             }
-            // Parse destination: string, number, or identifier
-            let dest = if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
+            // Parse destination: string, number, identifier, or the `*`
+            // wildcard (`ASSIGN @Out TO *`).
+            let mut dest = if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
                 self.expect_string()?
             } else if matches!(self.current.kind, TokenKind::IntegerLiteral(_)) {
                 self.expect_integer()?.to_string()
+            } else if matches!(self.current.kind, TokenKind::Star) {
+                self.advance();
+                "*".to_string()
             } else {
                 self.expect_identifier()?
             };
+            // Trailing options: `ASSIGN @Out TO *; FORMAT ON` / `; EOL OFF`.
+            while matches!(self.current.kind, TokenKind::Semicolon) {
+                self.advance();
+                let opt = self.expect_identifier()?;
+                let state = if matches!(self.current.kind, TokenKind::Identifier(_)) {
+                    format!("; {} {}", opt, self.expect_identifier()?)
+                } else if matches!(self.current.kind, TokenKind::On) {
+                    self.advance();
+                    format!("; {opt} ON")
+                } else {
+                    format!("; {opt}")
+                };
+                dest = format!("{dest}{state}");
+            }
             Ok(Stmt::Configure(format!("ASSIGN @{}", path), dest, span))
         } else {
             // Fallback — skip rest of line
@@ -1324,44 +1784,70 @@ impl Parser {
     fn parse_output(&mut self) -> Result<Stmt> {
         let span = self.span();
         self.advance(); // OUTPUT
-                        // OUTPUT @path; expr, expr, ...
-        let path = if matches!(self.current.kind, TokenKind::IoPath(_)) {
-            Some(self.expect_identifier()?)
-        } else {
-            None
+                        // OUTPUT @path; expr, expr, ... — the path is an IoPath token, not
+        // an Identifier, and `;` or `,` may follow it.
+        let path = match &self.current.kind {
+            TokenKind::IoPath(name) => {
+                let n = name.clone();
+                self.advance();
+                Some(n)
+            },
+            TokenKind::Identifier(name) => {
+                let n = name.clone();
+                self.advance();
+                Some(n)
+            },
+            _ => None,
         };
-        // Skip semicolon if present
-        self.skip_comma();
-        let mut exprs = Vec::new();
+        // Skip `;` or `,` after the path
+        if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
+            self.advance();
+        }
+        // Print-item list, separators preserved: a trailing `;` or `,`
+        // suppresses the line terminator (handled at runtime).
+        let mut items = Vec::new();
         while !matches!(
             self.current.kind,
             TokenKind::Newline | TokenKind::Eof | TokenKind::Colon
         ) {
-            exprs.push(self.parse_expression()?);
-            if matches!(self.current.kind, TokenKind::Comma)
-                || matches!(self.current.kind, TokenKind::Semicolon)
-            {
+            if matches!(self.current.kind, TokenKind::Semicolon) {
                 self.advance();
+                items.push(PrintItem::Semicolon);
+            } else if matches!(self.current.kind, TokenKind::Comma) {
+                self.advance();
+                items.push(PrintItem::Comma);
             } else {
-                break;
+                items.push(PrintItem::Expr(self.parse_expression()?));
             }
         }
-        Ok(Stmt::Configure(
-            format!("OUTPUT @{}", path.unwrap_or_default()),
-            exprs.first().map(|_| "data").unwrap_or("").to_string(),
-            span,
-        ))
+        Ok(Stmt::Output(path.unwrap_or_default(), items, span))
     }
 
     fn parse_enter_stmt(&mut self) -> Result<Stmt> {
         let span = self.span();
         self.advance(); // ENTER
-        let path = if matches!(self.current.kind, TokenKind::IoPath(_)) {
-            Some(self.expect_identifier()?)
-        } else {
-            None
+        let path = match &self.current.kind {
+            TokenKind::IoPath(name) => {
+                let n = name.clone();
+                self.advance();
+                Some(n)
+            },
+            TokenKind::Identifier(name) => {
+                let n = name.clone();
+                self.advance();
+                Some(n)
+            },
+            // Numeric select code: `ENTER 9; X` (on timeout.bas).
+            TokenKind::IntegerLiteral(n) => {
+                let s = n.to_string();
+                self.advance();
+                Some(s)
+            },
+            _ => None,
         };
-        self.skip_comma();
+        if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
+            self.advance();
+        }
         let vars = if !matches!(self.current.kind, TokenKind::Newline | TokenKind::Eof) {
             vec![self.expect_identifier()?]
         } else {
@@ -1378,7 +1864,15 @@ impl Parser {
         let span = self.span();
         self.advance(); // CALL
 
-        let name = self.expect_identifier()?;
+        // CALL "name" — string-literal subprogram name (DLL-style calls).
+        let name = match &self.current.kind {
+            TokenKind::StringLiteral(s) => {
+                let n = s.clone();
+                self.advance();
+                n
+            },
+            _ => self.expect_identifier()?,
+        };
         let mut args = Vec::new();
 
         if matches!(self.current.kind, TokenKind::LParen) {
@@ -1413,6 +1907,30 @@ impl Parser {
             self.expect(TokenKind::RParen)?;
         }
 
+        // `CALL "Msg", WITH("Line three",3)` — pass-by-value argument list.
+        if matches!(self.current.kind, TokenKind::Comma) {
+            self.advance();
+            if let TokenKind::Identifier(ref id) = self.current.kind {
+                if id.to_uppercase() == "WITH" {
+                    self.advance();
+                    if matches!(self.current.kind, TokenKind::LParen) {
+                        self.advance();
+                        while !matches!(self.current.kind, TokenKind::RParen | TokenKind::Eof) {
+                            let _ = self.parse_expression()?;
+                            if matches!(self.current.kind, TokenKind::Comma) {
+                                self.advance();
+                            }
+                        }
+                        self.expect(TokenKind::RParen)?;
+                    }
+                } else {
+                    args.push(self.parse_expression()?);
+                }
+            } else {
+                args.push(self.parse_expression()?);
+            }
+        }
+
         Ok(Stmt::Call(name, args, span))
     }
 
@@ -1439,6 +1957,77 @@ impl Parser {
             return Ok(Stmt::Mat(MatOp::Read(name, span), span));
         }
 
+        // Reduction / reorder forms: MAT SORT A(*), MAT REORDER M BY V,n,
+        // MAT CSUM A, MAT RSUM A (no `=` involved). These operate in place.
+        if let TokenKind::Identifier(ref kw) = self.current.kind {
+            let upper = kw.to_uppercase();
+            if matches!(upper.as_str(), "SORT" | "REORDER" | "CSUM" | "RSUM") {
+                self.advance();
+                let src = self.expect_identifier()?;
+                // BY vector (MAT REORDER M BY V,n) or TO vector (MAT SORT A
+                // TO V). `TO` lexes as a keyword, `BY` as an identifier.
+                let at_sep = |parser: &Parser| {
+                    matches!(parser.current.kind, TokenKind::To)
+                        || matches!(&parser.current.kind, TokenKind::Identifier(ref id)
+                            if id.eq_ignore_ascii_case("TO") || id.eq_ignore_ascii_case("BY"))
+                };
+                let mut vector = None;
+                // The whole-array marker may sit between the array and the
+                // separator (`MAT SORT B(*) TO B(1)` — mat sort.prg).
+                if !at_sep(self) {
+                    if matches!(self.current.kind, TokenKind::LParen) {
+                        self.advance();
+                        if matches!(self.current.kind, TokenKind::Star) {
+                            self.advance();
+                        }
+                        self.expect(TokenKind::RParen)?;
+                    }
+                }
+                if at_sep(self) {
+                    self.advance();
+                    vector = Some(self.expect_identifier()?);
+                    // Vector slot marker: MAT SORT B(*) TO B(1) (the `(1)`
+                    // is usually suppressed by the converter, but tolerate).
+                    if matches!(self.current.kind, TokenKind::LParen) {
+                        self.advance();
+                        if matches!(self.current.kind, TokenKind::IntegerLiteral(_)) {
+                            self.advance();
+                        }
+                        self.expect(TokenKind::RParen)?;
+                    }
+                }
+                // Optional subscript: REORDER M BY V,2
+                let mut subscript = None;
+                if matches!(self.current.kind, TokenKind::Comma) {
+                    self.advance();
+                    if let TokenKind::IntegerLiteral(ref n) = self.current.kind {
+                        subscript = Some(*n);
+                        self.advance();
+                    }
+                }
+                // Trailing direction modifier: MAT SORT A(*) DESC
+                // (mat sort.prg). DES is the abbreviated spelling.
+                let mut desc = false;
+                if let TokenKind::Identifier(ref m) = self.current.kind {
+                    if matches!(m.to_uppercase().as_str(), "DESC" | "DES") {
+                        desc = true;
+                        self.advance();
+                    }
+                }
+                let func = match upper.as_str() {
+                    "RSUM" => ReducFunc::Rsum,
+                    "CSUM" => ReducFunc::Csum,
+                    "SORT" if desc => ReducFunc::SortDesc,
+                    "SORT" => ReducFunc::Sort,
+                    _ => ReducFunc::Reorder,
+                };
+                return Ok(Stmt::Mat(
+                    MatOp::Reduc(src.clone(), func, src, vector, subscript, span),
+                    span,
+                ));
+            }
+        }
+
         // MAT A = ...
         let dest = self.expect_identifier()?;
         self.expect(TokenKind::Eq)?;
@@ -1458,6 +2047,38 @@ impl Parser {
             },
             _ => None,
         };
+
+        // Assignment-form reductions: `MAT Vector=CSUM(Matrix)` (csum.bas),
+        // `MAT V=RSUM(M)`.
+        if let TokenKind::Identifier(ref id) = self.current.kind {
+            let red = match id.to_uppercase().as_str() {
+                "CSUM" => Some(ReducFunc::Csum),
+                "RSUM" => Some(ReducFunc::Rsum),
+                _ => None,
+            };
+            if let Some(red) = red {
+                self.advance();
+                let src = if matches!(self.current.kind, TokenKind::LParen) {
+                    self.advance();
+                    let n = self.expect_identifier()?;
+                    if !matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket) {
+                        return Err(HtBasicError::ParseError {
+                            expected: ")".into(),
+                            found: self.current.kind.name().into(),
+                            span: self.span(),
+                        });
+                    }
+                    self.advance();
+                    n
+                } else {
+                    self.expect_identifier()?
+                };
+                return Ok(Stmt::Mat(
+                    MatOp::Reduc(dest, red, src, None, None, span),
+                    span,
+                ));
+            }
+        }
 
         if let Some(func) = mat_func {
             self.advance(); // consume function name
@@ -1494,6 +2115,13 @@ impl Parser {
                 // No arguments: MAT A = ZER, MAT A = CON, MAT A = IDN
                 Ok(Stmt::Mat(MatOp::FuncInit(dest, func, vec![], span), span))
             }
+        } else if matches!(self.current.kind, TokenKind::LParen) {
+            // `MAT B$=("E")` — parenthesized initializer; represent as an
+            // empty ZER init (parse-clean stand-in).
+            self.advance();
+            let _ = self.parse_expression()?;
+            self.expect(TokenKind::RParen)?;
+            Ok(Stmt::Mat(MatOp::FuncInit(dest, MatFunc::Zer, vec![], span), span))
         } else {
             let src = self.expect_identifier()?;
 
@@ -1536,9 +2164,8 @@ impl Parser {
             "PENUP" => Ok(Stmt::Gfx(GfxCmd::Penup, span)),
             "FRAME" => Ok(Stmt::Gfx(GfxCmd::Frame, span)),
             "CLIP" => {
-                if matches!(self.current.kind, TokenKind::Identifier(_)) {
-                    let kw = self.current.kind.name().to_uppercase();
-                    if kw == "OFF" {
+                if let TokenKind::Identifier(ref id) = self.current.kind {
+                    if id.to_uppercase() == "OFF" {
                         self.advance();
                         return Ok(Stmt::Gfx(GfxCmd::ClipOff, span));
                     }
@@ -1592,11 +2219,21 @@ impl Parser {
                 Ok(Stmt::Gfx(GfxCmd::Plot(x, y), span))
             },
             "PEN" => {
-                let n = self.expect_integer()? as usize;
+                let n = self.parse_number()? as usize;
                 Ok(Stmt::Gfx(GfxCmd::Pen(n), span))
             },
             "LABEL" => {
-                let s = self.expect_string()?;
+                // LABEL "text" — or LABEL <expression> (ai.bas: LABEL Loop).
+                let s = if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
+                    self.expect_string()?
+                } else {
+                    let start = self.current.span.start;
+                    let _ = self.parse_expression()?;
+                    let end = self.current.span.start;
+                    self.source[start.min(self.source.len())..end.min(self.source.len())]
+                        .trim()
+                        .to_string()
+                };
                 Ok(Stmt::Gfx(GfxCmd::Label(s), span))
             },
             "CSIZE" => {
@@ -1616,47 +2253,128 @@ impl Parser {
                 Ok(Stmt::Gfx(GfxCmd::Ldir(angle), span))
             },
             "LORG" => {
-                let n = self.expect_integer()? as usize;
+                let n = self.parse_number()? as usize;
                 Ok(Stmt::Gfx(GfxCmd::Lorg(n), span))
             },
             "GFONT" => {
+                // Optional IS: GFONT [IS] "name"
+                if let TokenKind::Identifier(ref id) = self.current.kind {
+                    if id.to_uppercase() == "IS" {
+                        self.advance();
+                    }
+                }
                 let s = self.expect_string()?;
                 Ok(Stmt::Gfx(GfxCmd::Gfont(s), span))
             },
             "AXES" => {
-                let xtic = self.parse_number()?;
-                let ytic = self.parse_number()?;
-                let xorg = self.parse_number()?;
-                let yorg = self.parse_number()?;
+                // 0–4 optional arguments (defaults 0.0).
+                let xtic = self.parse_optional_number()?;
+                let ytic = self.parse_optional_number()?;
+                let xorg = self.parse_optional_number()?;
+                let yorg = self.parse_optional_number()?;
                 Ok(Stmt::Gfx(GfxCmd::Axes(xtic, ytic, xorg, yorg), span))
             },
             "GRID" => {
-                let xtic = self.parse_number()?;
-                let ytic = self.parse_number()?;
-                let xorg = self.parse_number()?;
-                let yorg = self.parse_number()?;
+                // 0–4 optional arguments (defaults 0.0).
+                let xtic = self.parse_optional_number()?;
+                let ytic = self.parse_optional_number()?;
+                let xorg = self.parse_optional_number()?;
+                let yorg = self.parse_optional_number()?;
                 Ok(Stmt::Gfx(GfxCmd::Grid(xtic, ytic, xorg, yorg), span))
             },
             "GLOAD" => {
-                let s = self.expect_string()?;
-                Ok(Stmt::Gfx(GfxCmd::Gload(s), span))
+                if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
+                    let s = self.expect_string()?;
+                    Ok(Stmt::Gfx(GfxCmd::Gload(s), span))
+                } else {
+                    // Device form: GLOAD CRT,3;A(*)
+                    let device = match &self.current.kind {
+                        TokenKind::IoPath(n) => {
+                            let n = n.clone();
+                            self.advance();
+                            format!("@{n}")
+                        },
+                        TokenKind::Identifier(n) => {
+                            let n = n.clone();
+                            self.advance();
+                            n
+                        },
+                        _ => String::new(),
+                    };
+                    let mut spec = device;
+                    if matches!(self.current.kind, TokenKind::Comma) {
+                        self.advance();
+                        let n = self.parse_number()?;
+                        spec = format!("{spec},{n}");
+                    }
+                    if matches!(self.current.kind, TokenKind::Semicolon) {
+                        self.advance();
+                        spec = format!("{spec};{}", self.expect_identifier()?);
+                        if matches!(self.current.kind, TokenKind::LParen) {
+                            self.advance();
+                            if matches!(self.current.kind, TokenKind::Star) {
+                                self.advance();
+                            }
+                            self.expect(TokenKind::RParen)?;
+                            spec = format!("{spec}(*)");
+                        }
+                    }
+                    Ok(Stmt::Gfx(GfxCmd::Gload(spec), span))
+                }
             },
             "GSTORE" => {
-                let s = self.expect_string()?;
-                Ok(Stmt::Gfx(GfxCmd::Gstore(s), span))
+                if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
+                    let s = self.expect_string()?;
+                    Ok(Stmt::Gfx(GfxCmd::Gstore(s), span))
+                } else {
+                    // Device form: GSTORE CRT,1;A(*)
+                    let device = match &self.current.kind {
+                        TokenKind::IoPath(n) => {
+                            let n = n.clone();
+                            self.advance();
+                            format!("@{n}")
+                        },
+                        TokenKind::Identifier(n) => {
+                            let n = n.clone();
+                            self.advance();
+                            n
+                        },
+                        _ => String::new(),
+                    };
+                    let mut spec = device;
+                    if matches!(self.current.kind, TokenKind::Comma) {
+                        self.advance();
+                        let n = self.parse_number()?;
+                        spec = format!("{spec},{n}");
+                    }
+                    if matches!(self.current.kind, TokenKind::Semicolon) {
+                        self.advance();
+                        spec = format!("{spec};{}", self.expect_identifier()?);
+                        if matches!(self.current.kind, TokenKind::LParen) {
+                            self.advance();
+                            if matches!(self.current.kind, TokenKind::Star) {
+                                self.advance();
+                            }
+                            self.expect(TokenKind::RParen)?;
+                            spec = format!("{spec}(*)");
+                        }
+                    }
+                    Ok(Stmt::Gfx(GfxCmd::Gstore(spec), span))
+                }
             },
             "RECTANGLE" => {
-                let x1 = self.parse_number()?;
-                let y1 = self.parse_number()?;
-                let x2 = self.parse_number()?;
-                let y2 = self.parse_number()?;
-                Ok(Stmt::Gfx(
-                    GfxCmd::Rectangle(x1, y1, x2, y2, true, true),
-                    span,
-                ))
+                let w = self.parse_number()?;
+                let h = self.parse_number()?;
+                let (fill, edge) = self.parse_fill_edge();
+                Ok(Stmt::Gfx(GfxCmd::Rectangle(w, h, fill, edge), span))
             },
             "COLOR" => {
-                let s = self.expect_string()?;
+                // COLOR "name" — or COLOR MAP (identifier specifier).
+                let s = if matches!(self.current.kind, TokenKind::StringLiteral(_)) {
+                    self.expect_string()?
+                } else {
+                    self.expect_identifier()?
+                };
                 Ok(Stmt::Gfx(GfxCmd::Color(s), span))
             },
             "SEPARATE" => {
@@ -1678,7 +2396,7 @@ impl Parser {
             "LINE" => {
                 let next = self.expect_identifier()?.to_uppercase();
                 if next == "TYPE" {
-                    let n = self.expect_integer()? as usize;
+                    let n = self.parse_number()? as usize;
                     Ok(Stmt::Gfx(GfxCmd::LineType(n), span))
                 } else {
                     Ok(Stmt::Rem(format!("LINE {}", next), span))
@@ -1687,7 +2405,7 @@ impl Parser {
             "AREA" => {
                 let next = self.expect_identifier()?.to_uppercase();
                 if next == "PEN" {
-                    let n = self.expect_integer()? as usize;
+                    let n = self.parse_number()? as usize;
                     Ok(Stmt::Gfx(GfxCmd::Pen(n), span))
                 } else if next == "COLOR" {
                     let h = self.parse_number()?;
@@ -1712,11 +2430,10 @@ impl Parser {
             "SET" => {
                 let next = self.expect_identifier()?.to_uppercase();
                 if next == "PEN" {
-                    let n = self.expect_integer()? as usize;
+                    let n = self.parse_number()? as usize;
                     // SET PEN n INTENSITY r,g,b
-                    if matches!(self.current.kind, TokenKind::Identifier(_)) {
-                        let kw = self.current.kind.name().to_uppercase();
-                        if kw == "INTENSITY" {
+                    if let TokenKind::Identifier(ref id) = self.current.kind {
+                        if id.to_uppercase() == "INTENSITY" {
                             self.advance();
                             let r = self.parse_number()?;
                             let g = self.parse_number()?;
@@ -1748,18 +2465,20 @@ impl Parser {
                 }
             },
             "POLYGON" => {
-                let points = self.parse_point_list()?;
-                Ok(Stmt::Gfx(GfxCmd::Polygon(points), span))
+                let radius = self.parse_number()?;
+                let chords = self.parse_polygon_chords()?;
+                let (fill, edge) = self.parse_fill_edge();
+                Ok(Stmt::Gfx(GfxCmd::PolygonReg(radius, chords, fill, edge), span))
             },
             "POLYLINE" => {
-                let points = self.parse_point_list()?;
-                Ok(Stmt::Gfx(GfxCmd::Polyline(points), span))
+                let radius = self.parse_number()?;
+                let chords = self.parse_polygon_chords()?;
+                Ok(Stmt::Gfx(GfxCmd::PolylineReg(radius, chords), span))
             },
             "DIGITIZE" => Ok(Stmt::Gfx(GfxCmd::DigiTize, span)),
             "READ" => {
-                if matches!(self.current.kind, TokenKind::Identifier(_)) {
-                    let next = self.current.kind.name().to_uppercase();
-                    if next == "LOCATOR" {
+                if let TokenKind::Identifier(ref id) = self.current.kind {
+                    if id.to_uppercase() == "LOCATOR" {
                         self.advance();
                         let var = self.expect_identifier()?;
                         return Ok(Stmt::Gfx(GfxCmd::ReadLocator(var), span));
@@ -1780,6 +2499,78 @@ impl Parser {
         if matches!(self.current.kind, TokenKind::Comma) {
             self.advance();
         }
+    }
+
+    /// Number argument that defaults to 0.0 when the next token cannot
+    /// start one (`AXES`/`GRID` take 0–4 arguments).
+    fn parse_optional_number(&mut self) -> Result<f64> {
+        let next_is_number = matches!(
+            self.current.kind,
+            TokenKind::IntegerLiteral(_)
+                | TokenKind::RealLiteral(_)
+                | TokenKind::Minus
+                | TokenKind::Identifier(_)
+                | TokenKind::StringIdentifier(_)
+                | TokenKind::LParen
+        );
+        if next_is_number {
+            self.parse_number()
+        } else {
+            Ok(0.0)
+        }
+    }
+
+    /// Optional `total[,drawn]` chord counts after a POLYGON/POLYLINE
+    /// radius (e.g. `POLYGON 10,10,8`). Drawn defaults to total; both
+    /// default to 60 in the interpreter when absent here.
+    fn parse_polygon_chords(&mut self) -> Result<Option<(f64, f64)>> {
+        let next_is_number = matches!(
+            self.current.kind,
+            TokenKind::IntegerLiteral(_) | TokenKind::RealLiteral(_) | TokenKind::Minus
+        );
+        if !next_is_number {
+            return Ok(None);
+        }
+        let total = self.parse_number()?;
+        let drawn = if matches!(
+            self.current.kind,
+            TokenKind::IntegerLiteral(_) | TokenKind::RealLiteral(_) | TokenKind::Minus
+        ) {
+            self.parse_number()?
+        } else {
+            total
+        };
+        Ok(Some((total, drawn)))
+    }
+
+    /// Optional FILL/EDGE flags after a POLYGON/RECTANGLE area specifier.
+    /// The preceding parse_number already consumed the comma before the
+    /// first flag; "comma flag" pairs may repeat. If neither is given,
+    /// EDGE is assumed (HTBasic default).
+    fn parse_fill_edge(&mut self) -> (bool, bool) {
+        let mut fill = false;
+        let mut edge = false;
+        loop {
+            let kw = match &self.current.kind {
+                TokenKind::Identifier(name) => name.to_uppercase(),
+                _ => break,
+            };
+            if kw == "FILL" {
+                fill = true;
+            } else if kw == "EDGE" {
+                edge = true;
+            } else {
+                break;
+            }
+            self.advance();
+            if matches!(self.current.kind, TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        if !fill && !edge {
+            edge = true;
+        }
+        (fill, edge)
     }
 
     fn parse_point_list(&mut self) -> Result<Vec<(f64, f64)>> {
@@ -1881,6 +2672,7 @@ impl Parser {
                         Expr::Variable(_, s) => *s,
                         Expr::StringVariable(_, s) => *s,
                         Expr::ArrayRef(_, _, s) => *s,
+                        Expr::WholeArray(_, s) => *s,
                         Expr::FnCall(_, _, s) => *s,
                         Expr::StringFnCall(_, _, s) => *s,
                         Expr::SubStr(_, _, _, _, s) => *s,
@@ -1894,6 +2686,7 @@ impl Parser {
                         Expr::Variable(_, s) => *s,
                         Expr::StringVariable(_, s) => *s,
                         Expr::ArrayRef(_, _, s) => *s,
+                        Expr::WholeArray(_, s) => *s,
                         Expr::FnCall(_, _, s) => *s,
                         Expr::StringFnCall(_, _, s) => *s,
                         Expr::SubStr(_, _, _, _, s) => *s,
@@ -1957,6 +2750,43 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Real(val, span))
             },
+            TokenKind::Real => {
+                // REAL doubles as a type keyword and a conversion function;
+                // in expression position it is the function.
+                self.advance();
+                if matches!(self.current.kind, TokenKind::LParen) {
+                    self.advance();
+                    let mut args = Vec::new();
+                    loop {
+                        if matches!(self.current.kind, TokenKind::RParen) {
+                            break;
+                        }
+                        // Slice range separators in array refs: `C$(1,:4,*)`
+                        // (dim.bas) — skip leading colons and fold `*`
+                        // whole-range markers into the arg list.
+                        while matches!(self.current.kind, TokenKind::Colon) {
+                            self.advance();
+                        }
+                        if matches!(self.current.kind, TokenKind::Star) {
+                            self.advance();
+                            args.push(Expr::String_("*".into(), span));
+                            if matches!(self.current.kind, TokenKind::Comma | TokenKind::Colon) {
+                                self.advance();
+                            }
+                            continue;
+                        }
+                        args.push(self.parse_expression()?);
+                        if matches!(self.current.kind, TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(Expr::FnCall("REAL".to_string(), args, span));
+                }
+                Ok(Expr::Variable("REAL".to_string(), span))
+            },
             TokenKind::StringLiteral(s) => {
                 let val = s.clone();
                 self.advance();
@@ -1969,10 +2799,31 @@ impl Parser {
                 // Function call: name(args)
                 if matches!(self.current.kind, TokenKind::LParen) {
                     self.advance();
+                    // Whole-array reference: A(*) — passed to SUBs and
+                    // used with READ/PRINT.
+                    if matches!(self.current.kind, TokenKind::Star) {
+                        self.advance();
+                        self.expect(TokenKind::RParen)?;
+                        return Ok(Expr::WholeArray(name, span));
+                    }
                     let mut args = Vec::new();
                     loop {
                         if matches!(self.current.kind, TokenKind::RParen) {
                             break;
+                        }
+                        // Slice range separators in array refs: `C$(1,:4,*)`
+                        // (dim.bas) — skip leading colons and fold `*`
+                        // whole-range markers into the arg list.
+                        while matches!(self.current.kind, TokenKind::Colon) {
+                            self.advance();
+                        }
+                        if matches!(self.current.kind, TokenKind::Star) {
+                            self.advance();
+                            args.push(Expr::String_("*".into(), span));
+                            if matches!(self.current.kind, TokenKind::Comma | TokenKind::Colon) {
+                                self.advance();
+                            }
+                            continue;
                         }
                         args.push(self.parse_expression()?);
                         if matches!(self.current.kind, TokenKind::Comma) {
@@ -1997,10 +2848,30 @@ impl Parser {
                 // String function call: name$(args)
                 if matches!(self.current.kind, TokenKind::LParen) {
                     self.advance();
+                    // Whole-array reference: A$(*)
+                    if matches!(self.current.kind, TokenKind::Star) {
+                        self.advance();
+                        self.expect(TokenKind::RParen)?;
+                        return Ok(Expr::WholeArray(name, span));
+                    }
                     let mut args = Vec::new();
                     loop {
                         if matches!(self.current.kind, TokenKind::RParen) {
                             break;
+                        }
+                        // Slice range separators in array refs: `C$(1,:4,*)`
+                        // (dim.bas) — skip leading colons and fold `*`
+                        // whole-range markers into the arg list.
+                        while matches!(self.current.kind, TokenKind::Colon) {
+                            self.advance();
+                        }
+                        if matches!(self.current.kind, TokenKind::Star) {
+                            self.advance();
+                            args.push(Expr::String_("*".into(), span));
+                            if matches!(self.current.kind, TokenKind::Comma | TokenKind::Colon) {
+                                self.advance();
+                            }
+                            continue;
                         }
                         args.push(self.parse_expression()?);
                         if matches!(self.current.kind, TokenKind::Comma) {
@@ -2034,6 +2905,7 @@ impl Parser {
                         Expr::Variable(_, s) => *s,
                         Expr::StringVariable(_, s) => *s,
                         Expr::ArrayRef(_, _, s) => *s,
+                        Expr::WholeArray(_, s) => *s,
                         Expr::FnCall(_, _, s) => *s,
                         Expr::StringFnCall(_, _, s) => *s,
                         Expr::SubStr(_, _, _, _, s) => *s,
@@ -2068,6 +2940,7 @@ impl Parser {
                         Expr::Variable(_, s) => *s,
                         Expr::StringVariable(_, s) => *s,
                         Expr::ArrayRef(_, _, s) => *s,
+                        Expr::WholeArray(_, s) => *s,
                         Expr::FnCall(_, _, s) => *s,
                         Expr::StringFnCall(_, _, s) => *s,
                         Expr::SubStr(_, _, _, _, s) => *s,
@@ -2119,7 +2992,7 @@ impl Parser {
 
     fn expect_identifier_or_integer(&mut self) -> Result<String> {
         match &self.current.kind {
-            TokenKind::Identifier(name) => {
+            TokenKind::Identifier(name) | TokenKind::StringIdentifier(name) => {
                 let n = name.clone();
                 self.advance();
                 Ok(n)
@@ -2128,6 +3001,12 @@ impl Parser {
                 let s = n.to_string();
                 self.advance();
                 Ok(s)
+            },
+            // Word-like keyword tokens are legal label names
+            // (`GOTO End` — end select.bas).
+            TokenKind::End => {
+                self.advance();
+                Ok("End".to_string())
             },
             _ => Err(HtBasicError::ParseError {
                 expected: "identifier or line number".into(),
@@ -2171,6 +3050,10 @@ impl Parser {
         let mut body = Vec::new();
         loop {
             self.skip_newlines();
+            // `340 END WHILE` — line number precedes the terminator.
+            if let Some(lbl) = self.consume_labeled_kw(end_tokens) {
+                body.push(lbl);
+            }
             if matches!(self.current.kind, TokenKind::Eof) {
                 break;
             }
@@ -2203,8 +3086,22 @@ impl Parser {
                 if matches!(self.current.kind, TokenKind::RParen) {
                     break;
                 }
+                // Slice markers: `LET A$(1,:4,*)=...` (dim.bas) uses `:`
+                // ranges and `*` whole-range. A range separator can lead
+                // the next index (`1,:4`), so skip leading colons.
+                while matches!(self.current.kind, TokenKind::Colon) {
+                    self.advance();
+                }
+                if matches!(self.current.kind, TokenKind::Star) {
+                    self.advance();
+                    indices.push(Expr::String_("*".into(), self.span()));
+                    if matches!(self.current.kind, TokenKind::Comma | TokenKind::Colon) {
+                        self.advance();
+                    }
+                    continue;
+                }
                 indices.push(self.parse_expression()?);
-                if matches!(self.current.kind, TokenKind::Comma) {
+                if matches!(self.current.kind, TokenKind::Comma | TokenKind::Colon) {
                     self.advance();
                 } else {
                     break;
@@ -2285,8 +3182,28 @@ impl Parser {
                         if matches!(self.current.kind, TokenKind::RParen) {
                             break;
                         }
+                        // Slice markers: `A$(1,:4,*)` (dim.bas) uses `:`
+                        // ranges and `*` whole-range; `Palette(*)` is a
+                        // whole-array leftover (set pen.bas). A range
+                        // separator can lead the next index (`1,:4`),
+                        // so skip leading colons.
+                        while matches!(self.current.kind, TokenKind::Colon) {
+                            self.advance();
+                        }
+                        if matches!(self.current.kind, TokenKind::Star) {
+                            self.advance();
+                            if matches!(self.current.kind, TokenKind::RParen) {
+                                self.advance();
+                                return Ok(Stmt::Rem(format!("whole_array:{}", name), span));
+                            }
+                            indices.push(Expr::String_("*".into(), span));
+                            if matches!(self.current.kind, TokenKind::Comma | TokenKind::Colon) {
+                                self.advance();
+                            }
+                            continue;
+                        }
                         indices.push(self.parse_expression()?);
-                        if matches!(self.current.kind, TokenKind::Comma) {
+                        if matches!(self.current.kind, TokenKind::Comma | TokenKind::Colon) {
                             self.advance();
                         } else {
                             break;
@@ -2299,8 +3216,10 @@ impl Parser {
                         let value = self.parse_expression()?;
                         return Ok(Stmt::ArrayAssign(name, indices, value, span));
                     }
-                    // Not an assignment — just array access (e.g., PRINT A(1))
-                    return Ok(Stmt::Rem(format!("__array_access__{}", name), span));
+                    // Not an assignment — a bare `Name(args)` statement is a
+                    // CALL without the CALL keyword (`Prtmat(Matrix(*),3,3)`
+                    // — csum.bas).
+                    return Ok(Stmt::Call(name, indices, span));
                 }
 
                 // Check for substring assignment
@@ -2370,12 +3289,35 @@ impl Parser {
                     break;
                 }
 
+                // `SUB Bigparams(A, B, OPTIONAL C, D)` — OPTIONAL is a
+                // call-convention hint, not a type.
+                if let TokenKind::Identifier(ref id) = self.current.kind {
+                    if id.to_uppercase() == "OPTIONAL" {
+                        self.advance();
+                    }
+                }
+
                 let param_type = if matches!(self.current.kind, TokenKind::At) {
                     self.advance();
                     ParamType::IoPath
                 } else if matches!(self.current.kind, TokenKind::Star) {
                     self.advance();
                     ParamType::Array
+                } else if matches!(self.current.kind, TokenKind::Redim) {
+                    // `SUB Pass_a(REDIM A(*))` — whole-array parameter.
+                    self.advance();
+                    ParamType::Array
+                } else if matches!(
+                    self.current.kind,
+                    TokenKind::Integer
+                        | TokenKind::Real
+                        | TokenKind::Short
+                        | TokenKind::Long
+                        | TokenKind::Complex
+                ) {
+                    // Typed parameter: `SUB See(INTEGER X)`.
+                    self.advance();
+                    ParamType::Variable
                 } else {
                     ParamType::Variable
                 };
@@ -2420,6 +3362,10 @@ impl Parser {
         let mut body = Vec::new();
         loop {
             self.skip_newlines();
+            // `300 SUBEND` — line number precedes SUBEND.
+            if let Some(lbl) = self.consume_labeled_kw(&[TokenKind::SubEnd]) {
+                body.push(lbl);
+            }
             if matches!(self.current.kind, TokenKind::SubEnd | TokenKind::Eof) {
                 break;
             }
@@ -2449,12 +3395,22 @@ impl Parser {
         let returns_string = name.ends_with('$');
 
         let mut params = Vec::new();
+        let mut required_params = 0;
+        let mut seen_optional = false;
 
         if matches!(self.current.kind, TokenKind::LParen) {
             self.advance();
             loop {
                 if matches!(self.current.kind, TokenKind::RParen) {
                     break;
+                }
+                // `DEF FNMessage$(OPTIONAL String$)` — params to the right of
+                // OPTIONAL need not be passed (def fn.prg, fn.prg).
+                if let TokenKind::Identifier(ref id) = self.current.kind {
+                    if id.eq_ignore_ascii_case("OPTIONAL") {
+                        self.advance();
+                        seen_optional = true;
+                    }
                 }
                 let param_name = self.expect_identifier()?;
                 let pt = if param_name.ends_with('$') {
@@ -2466,6 +3422,9 @@ impl Parser {
                     name: param_name,
                     param_type: pt,
                 });
+                if !seen_optional {
+                    required_params += 1;
+                }
 
                 if matches!(self.current.kind, TokenKind::Comma) {
                     self.advance();
@@ -2482,6 +3441,10 @@ impl Parser {
         let mut body = Vec::new();
         loop {
             self.skip_newlines();
+            // `540 FNEND` — line number precedes FNEND.
+            if let Some(lbl) = self.consume_labeled_kw(&[TokenKind::FnEnd]) {
+                body.push(lbl);
+            }
             if matches!(self.current.kind, TokenKind::FnEnd | TokenKind::Eof) {
                 break;
             }
@@ -2497,6 +3460,7 @@ impl Parser {
             name,
             returns_string,
             params,
+            required_params,
             body,
             span,
         })

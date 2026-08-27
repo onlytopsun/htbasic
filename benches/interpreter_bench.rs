@@ -121,9 +121,7 @@ fn bench_string_vm(c: &mut Criterion) {
 }
 
 fn bench_array_tree(c: &mut Criterion) {
-    c.bench_function("array/tree", |b| {
-        b.iter(|| run_tree(black_box(ARRAY_OPS)))
-    });
+    c.bench_function("array/tree", |b| b.iter(|| run_tree(black_box(ARRAY_OPS))));
 }
 
 fn bench_array_vm(c: &mut Criterion) {
@@ -145,9 +143,7 @@ fn bench_nested_vm(c: &mut Criterion) {
 }
 
 fn bench_mixed_tree(c: &mut Criterion) {
-    c.bench_function("mixed/tree", |b| {
-        b.iter(|| run_tree(black_box(MIXED_OPS)))
-    });
+    c.bench_function("mixed/tree", |b| b.iter(|| run_tree(black_box(MIXED_OPS))));
 }
 
 fn bench_mixed_vm(c: &mut Criterion) {

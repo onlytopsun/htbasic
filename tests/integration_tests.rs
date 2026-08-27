@@ -630,7 +630,8 @@ fn test_graphics_frame() {
 fn test_graphics_rectangle() {
     let output = run_source(
         "GINIT\n\
-         RECTANGLE 10, 10, 90, 90\n\
+         RECTANGLE 10, 10\n\
+         RECTANGLE 10, 10, FILL, EDGE\n\
          PRINT \"Rectangle drawn\"\nEND\n",
     );
     assert_eq!(output, vec!["Rectangle drawn"]);
@@ -952,7 +953,7 @@ fn test_sub_params_preserved() {
 fn test_assign_gpib() {
     let output = run_source(
         "ASSIGN @Dev TO 722\n\
-         PRINT \"Assigned\"\nEND\n"
+         PRINT \"Assigned\"\nEND\n",
     );
     assert_eq!(output, vec!["Assigned"]);
 }
@@ -961,7 +962,7 @@ fn test_assign_gpib() {
 fn test_assign_file() {
     let output = run_source(
         "ASSIGN @F TO \"test.dat\"\n\
-         PRINT \"File assigned\"\nEND\n"
+         PRINT \"File assigned\"\nEND\n",
     );
     assert_eq!(output, vec!["File assigned"]);
 }
@@ -987,7 +988,7 @@ fn test_statistics() {
          DIM A(5)\n\
          A(1)=2\nA(2)=4\nA(3)=6\nA(4)=8\nA(5)=10\n\
          PRINT MEAN(A)\n\
-         PRINT SUM(A)\nEND\n"
+         PRINT SUM(A)\nEND\n",
     );
     let mean: f64 = output[0].parse().unwrap();
     let sum: f64 = output[1].parse().unwrap();
@@ -1000,7 +1001,7 @@ fn test_std_deviation() {
     let output = run_source(
         "OPTION BASE 1\n\
          DIM A(3)\nA(1)=2\nA(2)=4\nA(3)=6\n\
-         PRINT STD(A)\nEND\n"
+         PRINT STD(A)\nEND\n",
     );
     let std_val: f64 = output[0].parse().unwrap();
     assert!(std_val > 0.0);
@@ -1010,7 +1011,7 @@ fn test_std_deviation() {
 fn test_fft_stubs() {
     let output = run_source(
         "DIM A(4)\nA(1)=1\nA(2)=0\nA(3)=0\nA(4)=0\n\
-         PRINT \"FFT ok\"\nEND\n"
+         PRINT \"FFT ok\"\nEND\n",
     );
     assert_eq!(output, vec!["FFT ok"]);
 }
@@ -1021,16 +1022,178 @@ fn test_fft_stubs() {
 
 #[test]
 fn test_vm_gosub_forward() {
-    let output = run_bytecode(
-        "GOSUB S\nPRINT \"Main\"\nEND\nS: PRINT \"Sub\"\nRETURN\n"
-    );
+    let output = run_bytecode("GOSUB S\nPRINT \"Main\"\nEND\nS: PRINT \"Sub\"\nRETURN\n");
     assert_eq!(output, vec!["Sub", "Main"]);
 }
 
 #[test]
 fn test_vm_gosub_backward() {
-    let output = run_bytecode(
-        "GOTO Main\nS: PRINT \"Sub\"\nRETURN\nMain: GOSUB S\nPRINT \"After\"\nEND\n"
-    );
+    let output =
+        run_bytecode("GOTO Main\nS: PRINT \"Sub\"\nRETURN\nMain: GOSUB S\nPRINT \"After\"\nEND\n");
     assert_eq!(output, vec!["Sub", "After"]);
+}
+
+#[test]
+fn test_on_error_goto_iopath() {
+    // `ON ERROR GOTO @File` — shipped example programs (assign.prg) branch
+    // ON ERROR to an I/O path stored in the container's name table.
+    let output = run_source("10 ON ERROR GOTO @File\n20 END\n");
+    assert_eq!(output, Vec::<String>::new());
+}
+
+
+#[test]
+fn test_parser_gap_coverage() {
+    // Regression coverage for every parser gap discovered while
+    // parse-checking the converted TransEra examples (Stage 5).
+    use htbasic::parser::parser::Parser;
+    let cases = [
+        "PLOTTER IS CRT,\"INTERNAL\"; COLOR MAP",
+        "ASSIGN @File TO \"test.txt\"; FORMAT ON",
+        "DISP",
+        "DISP Height",
+        "DISP Msg$",
+        "OUTPUT @Out;\"  [\";",
+        "INPUT \"Please enter your age:\", Age",
+        "ON INTR 7,1 GOTO Intrr",
+        "ON TIMEOUT 9,5 GOTO L50",
+        "ON KBD ALL GOSUB Keyhit",
+        "ON TIME(TIMEDATE+X) MOD 86400 GOTO Here",
+        "GRAPHICS OFF",
+        "GRID",
+        "GRID 10,10",
+        "ALPHA OFF",
+        "KBD CMODE ON",
+        "KEY LABELS OFF",
+        "KEY LABELS PEN Blue",
+        "LINE TYPE Loop",
+        "LORG X",
+        "MAT SORT A(*)",
+        "MAT REORDER Matrix TO Vector,2",
+        "MAT B$=(\"E\")",
+        "CALL \"Msg\", WITH(\"Line three\",3)",
+        "TRACK CRT IS ON",
+        "CONFIGURE MSI ON",
+        "CONFIGURE SAVE ASCII ON",
+        "DISPLAY FUNCTIONS ON",
+        "LET X=REAL(COSH(C))",
+        "GFONT IS \"\"",
+        "SYMBOL A(*), FILL, EDGE",
+        "ENTER @Buf; A$",
+        "ASSIGN @Out TO *",
+        "SUB Bigparams(A, B, OPTIONAL C, D)",
+        "AXES X_tick,Y_tick",
+        // Second wave: remaining failures fixed after the first pass.
+        "CLIP OFF",
+        "LABEL Loop",
+        "PRINT USING Image; Price",
+        "LET A$(1,:4,*)=C$(1,:4,*)",
+        "GOTO End",
+        "ON END @File GOTO Here",
+        "ON TIMEOUT 9,1 GOTO X$",
+        "ENTER 9; X",
+        "TRACE OFF",
+        "IF J=60 THEN TRACE OFF",
+        "OFF END @File",
+    ];
+    for c in cases {
+        let src = format!("10 {c}\n");
+        match Parser::new(src.clone()).parse_program() {
+            Ok(_) => {},
+            Err(e) => {
+                panic!("parse failed for `{c}`: {e:?}");
+            }
+        }
+    }
+}
+
+// ===================== interpreter fixes for converted programs =====================
+
+/// MAT REORDER M BY V,n with a subscript reorders along that dimension
+/// (mat reorder.prg / mat_redorder.prg family).
+#[test]
+fn test_mat_reorder_by() {
+    let src = "\
+DIM M(1,2)
+M(0,0)=1
+M(0,1)=2
+M(0,2)=3
+M(1,0)=4
+M(1,1)=5
+M(1,2)=6
+DIM V(3)
+V(0)=3
+V(1)=2
+V(2)=1
+MAT REORDER M BY V,2
+PRINT M(0,0);M(0,1);M(0,2)
+PRINT M(1,0);M(1,1);M(1,2)
+END
+";
+    let output = run_source(src);
+    let joined: String = output.concat();
+    assert_eq!(joined.replace(' ', ""), "321654");
+}
+
+/// MAT SORT A(*) [DESC] sorts the array in place (mat sort.prg).
+#[test]
+fn test_mat_sort_desc() {
+    let src = "\
+DIM A(3)
+A(0)=2
+A(1)=9
+A(2)=1
+A(3)=5
+MAT SORT A(*) DESC
+PRINT A(0);A(1);A(2);A(3)
+MAT SORT A(*)
+PRINT A(0);A(1);A(2);A(3)
+END
+";
+    let output = run_source(src);
+    let joined: String = output.concat();
+    assert_eq!(joined.replace(' ', ""), "95211259");
+}
+
+/// DEF FN with an OPTIONAL parameter: omitted args are zeroed (fn.prg).
+#[test]
+fn test_def_fn_optional_fnend() {
+    let src = "\
+10 DEF FNJoin$(A$,OPTIONAL B$)
+20 IF OPTIONAL=0 THEN RETURN A$&\"?\"
+30 RETURN A$&B$
+40 FNEND
+50 PRINT FNJoin$(\"Hi\")
+60 PRINT FNJoin$(\"Hi\",\" there\")
+70 END
+";
+    let output = run_source(src);
+    assert_eq!(output, vec!["Hi?", "Hi there"]);
+}
+
+/// OUTPUT @CRT with a trailing `;` keeps the line open so later OUTPUTs
+/// append (converted programs accumulate device output).
+#[test]
+fn test_output_accumulation_crt() {
+    let src = "\
+OUTPUT @CRT; \"AB\";
+OUTPUT @CRT; \"CD\"
+OUTPUT @CRT; \"EF\"
+END
+";
+    let output = run_source(src);
+    assert_eq!(output, vec!["ABCD", "EF"]);
+}
+
+/// Converted programs carry line numbers on every statement.
+#[test]
+fn test_line_numbered_for_loop() {
+    let src = "\
+10 FOR I=1 TO 3
+20 PRINT I
+30 NEXT I
+40 END
+";
+    let output = run_source(src);
+    assert_eq!(output, vec!["1", "2", "3"]);
 }

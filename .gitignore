@@ -20,3 +20,9 @@ test_*.dat
 
 # REPL history
 .htbasic_history
+
+# Converted TransEra example sources (derived from copyrighted originals)
+/converted/
+
+# TransEra help dump (copyrighted) — local search corpus only, never committed
+/_htbasic_help.txt
