@@ -23,6 +23,20 @@ cargo run -- --bytecode program.bas
 echo 'PRINT "Hello World"' | cargo run
 ```
 
+## TransEra Container Converter
+
+Convert HTBwin95 binary program containers (tokenized `.prg` files) to ASCII
+BASIC source this interpreter can run:
+
+```bash
+cargo run -- -c "C:\Program Files (x86)\HTBwin95\examples\print.prg"   # one file
+cargo run -- -C "C:\Program Files (x86)\HTBwin95\examples" -O converted --report   # batch
+cargo run -- --check-dir converted                                      # parse-check results
+```
+
+See [CONVERTER.md](CONVERTER.md) for the full guide (all flags, output details,
+DLL handling, library API, caveats).
+
 ## REPL Commands
 
 The interactive REPL supports both immediate execution and program editing:
